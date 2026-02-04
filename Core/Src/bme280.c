@@ -3,7 +3,7 @@
  *
  * Created on: Feb 3, 2026
  * Author: Bmbosima
- * Emial:bmbosima@uwaterloo.ca
+ * Email:bmbosima@uwaterloo.ca
  */
 
 #include "bme280.h"
