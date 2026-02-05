@@ -57,6 +57,12 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define onboard_LED_Pin GPIO_PIN_5
+#define onboard_LED_GPIO_Port GPIOA
+#define DOOR_SENSOR_Pin GPIO_PIN_4
+#define DOOR_SENSOR_GPIO_Port GPIOB
+#define ALARM_Pin GPIO_PIN_5
+#define ALARM_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 

@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "bme280.h"
 #include "pir.h"
+#include "door.h"
+#include "buzzer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,17 +99,50 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  /* USER CODE BEGIN WHILE */
   while (1)
   {
-    BME280_ReadSensor(&sensor_data);
+	 // HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_SET);
+	 // HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+	 // HAL_Delay(500);
+	  //HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_RESET);
+	 // HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+	  //HAL_Delay(500);
+
+
+    //BME280_ReadSensor(&sensor_data);
 
     // Your data is now in:
     // sensor_data.temperature_C
     // sensor_data.pressure_hPa
     // sensor_data.humidity_pct
 
-    HAL_Delay(1000); // Wait 1 second
+    //HAL_Delay(1000); // Wait 1 second
+
+    // 2. Check Door (PB4)
+	  if (Door_GetStatus() == DOOR_OPEN)
+	      {
+	          // --- ALARM MODE ---
+	          // Beep ON
+	          Buzzer_On();
+	          HAL_Delay(100);
+
+	          // Beep OFF
+	          Buzzer_Off();
+	          HAL_Delay(100);
+
+	          // (Optional: Also flash the LED if you want both)
+	          HAL_GPIO_TogglePin(onboard_LED_GPIO_Port, onboard_LED_Pin);
+	      }
+	      else
+	      {
+	          // --- QUIET MODE ---
+	          // Ensure buzzer is definitely OFF
+	          Buzzer_Off();
+	          HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_RESET);
+
+	          // Sleep for a bit to save power
+	          HAL_Delay(500);
+	      }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -224,11 +259,37 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : onboard_LED_Pin */
+  GPIO_InitStruct.Pin = onboard_LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(onboard_LED_GPIO_Port, &GPIO_InitStruct);
+
   /*Configure GPIO pin : PA8 */
   GPIO_InitStruct.Pin = GPIO_PIN_8;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : DOOR_SENSOR_Pin */
+  GPIO_InitStruct.Pin = DOOR_SENSOR_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(DOOR_SENSOR_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : ALARM_Pin */
+  GPIO_InitStruct.Pin = ALARM_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(ALARM_GPIO_Port, &GPIO_InitStruct);
 
   /* EXTI interrupt init*/
   HAL_NVIC_SetPriority(EXTI9_5_IRQn, 0, 0);
@@ -243,22 +304,23 @@ static void MX_GPIO_Init(void)
 // This function is AUTOMATICALLY called when an interrupt happens
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    if (GPIO_Pin == PIR_PIN) // Verify it's the PIR pin that triggered this
+    if (GPIO_Pin == PIR_PIN) // Verify it's the PIR pin (PA8) that triggered this
     {
         if (PIR_GetStatus() == PIR_MOTION_DETECTED)
         {
-            // Motion Started!
-            // I am going to add the whole actuatuion here
+            // Motion Started -> Turn LED ON
+            HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_SET);
         }
         else
         {
-            // Motion Stopped!
-           //and actuation here too
+            // Motion Stopped -> Turn LED OFF
+            HAL_GPIO_WritePin(onboard_LED_GPIO_Port, onboard_LED_Pin, GPIO_PIN_RESET);
         }
     }
 }
 
 /* USER CODE END 4 */
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
