@@ -8,7 +8,6 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "buzzer.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -32,7 +31,11 @@
 
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan;
+// RTOS-Ready Flag: 1 = Armed, 0 = Disarmed
+volatile uint8_t system_armed = 0;
 
+// Debounce timestamp
+volatile uint32_t last_button_press = 0;
 /* USER CODE BEGIN PV */
 CAN_RxHeaderTypeDef   RxHeader;
 uint8_t               RxData[8];
@@ -108,35 +111,31 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
-    {
-      // --- STEP 3: CAN RECEIVE ---
-      // Check if any messages are waiting in the FIFO
-      if (HAL_CAN_GetRxFifoFillLevel(&hcan, CAN_RX_FIFO0) > 0)
       {
-          // Retrieve the message
-          if (HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK)
+        if (HAL_CAN_GetRxFifoFillLevel(&hcan, CAN_RX_FIFO0) > 0)
+        {
+          HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &RxHeader, RxData);
+
+          // LOGIC: Only buzz if Door is Open (D) AND System is Armed
+          if (RxData[0] == 'D')
           {
-              // --- STEP 4: ALARM LOGIC ---
-              if (RxData[0] == 'D')
+              if (system_armed == 1)
               {
-                  // Door Open received -> Turn Alarm ON
-                  HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_SET);
-
-                  // Optional: Toggle LED for visual confirmation
-                  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET);
+                  Buzzer_On();
+                  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // Green LED
               }
-              else if (RxData[0] == 'C')
-              {
-                  // Door Closed received -> Turn Alarm OFF
-                  HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
-
-                  // Turn off visual LED
-                  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-              }
+              // If system_armed is 0, we do nothing (ignore the intruder!)
           }
+          else if (RxData[0] == 'C')
+          {
+              // Door closed - always safe to turn off buzzer
+              Buzzer_Off();
+              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+          }
+        }
       }
-    }
     /* USER CODE END WHILE */
+
     /* USER CODE BEGIN 3 */
 
   /* USER CODE END 3 */
@@ -234,13 +233,19 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, ARM_LED_Pin|GPIO_PIN_5, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin : PA5 */
-  GPIO_InitStruct.Pin = GPIO_PIN_5;
+  /*Configure GPIO pin : PUSH_BUTTON_Pin */
+  GPIO_InitStruct.Pin = PUSH_BUTTON_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(PUSH_BUTTON_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : ARM_LED_Pin PA5 */
+  GPIO_InitStruct.Pin = ARM_LED_Pin|GPIO_PIN_5;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -253,14 +258,42 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(ALARM_GPIO_Port, &GPIO_InitStruct);
 
+  /* EXTI interrupt init*/
+  HAL_NVIC_SetPriority(EXTI1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(EXTI1_IRQn);
+
 /* USER CODE BEGIN MX_GPIO_Init_2 */
 /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == GPIO_PIN_1) // Verify it's OUR button (PA1)
+    {
+        // --- RTOS-Friendly Debounce ---
+        uint32_t current_time = HAL_GetTick();
 
+        // Only accept input if 200ms has passed since the last press
+        if ((current_time - last_button_press) > 200)
+        {
+            // Toggle the Armed State
+            system_armed = !system_armed;
+
+            // Update the Red LED immediately
+            if(system_armed) {
+                HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_SET);
+            } else {
+                HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_RESET);
+                // Also kill the buzzer immediately if we disarm
+                Buzzer_Off();
+            }
+
+            last_button_press = current_time; // Reset timer
+        }
+    }
+}
 /* USER CODE END 4 */
-
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
