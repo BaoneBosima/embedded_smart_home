@@ -1,0 +1,25 @@
+# Build Folders (Binaries and object files)
+Debug/
+Release/
+build/
+bin/
+
+# Local IDE Settings (User specific preferences)
+.settings/
+.vscode/
+
+# STM32CubeIDE Specific Junk
+*.bak
+*.su
+*.launch
+*.d
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+
+# OS Junk
+.DS_Store
+Thumbs.db
