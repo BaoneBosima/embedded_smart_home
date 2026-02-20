@@ -1,0 +1,96 @@
+Here is the drafted content for your interview preparation notepad. You can copy and paste this directly.
+
+---
+
+### **Project Technical Interview Q&A: STM32 CAN Bus System**
+
+**Q1: Why did I choose to implement using CAN (Controller Area Network) and not other communication protocols like I2C, SPI, or UART?**
+
+**Answer:**
+I chose CAN primarily for its **reliability and noise immunity** in a distributed embedded system, similar to automotive or industrial environments.
+
+* **Differential Signaling:** Unlike UART, SPI, or I2C which use single-ended signaling (reference to ground), CAN uses differential signaling (CAN_H and CAN_L). This makes it highly resistant to electromagnetic interference (noise), which is critical when running wires between separate boards (Sensor Node and Actuator Node).
+* **Distance:** I2C and SPI are designed for short-distance, on-board communication (typically <10cm). CAN is designed for off-board communication over longer distances (meters to kilometers), making it suitable for a "Smart Home" or "Car Dashboard" simulation.
+* **Multi-Master Architecture:** CAN is message-based, not address-based. Any node can transmit when the bus is free, and the hardware handles arbitration. This makes the system scalable—I can add a third node (like a dashboard display) without changing the code on the existing sensor or actuator nodes.
+* **Data Integrity:** The CAN protocol has built-in hardware error checking (CRC), automatic retransmission upon collision, and acknowledgment (ACK) bits, ensuring that data is received correctly without needing complex software overhead.
+
+**Q2: Where did I choose to use interrupts in my code, and why interrupts instead of polling?**
+
+**Answer:**
+I implemented interrupts (specifically **EXTI - External Interrupts**) for the "Arm/Disarm" button logic on the Actuator Node.
+
+* **Responsiveness:** In a polling approach (using `if` statements inside `while(1)`), the CPU wastes cycles constantly checking the pin state. If the loop is long or blocked by a delay, a quick button press might be missed. An interrupt guarantees the CPU pauses its current task to handle the button press immediately.
+* **Efficiency & RTOS Readiness:** Polling prevents the CPU from sleeping or executing other lower-priority tasks efficiently. By using interrupts, I free up the main loop to handle the CAN messages or enter a low-power mode. This is also a precursor to using an **RTOS (Real-Time Operating System)**, where waiting for an event (semaphore) is preferred over busy-waiting (polling), which would starve other tasks.
+* **Debouncing:** I used the interrupt callback (`HAL_GPIO_EXTI_Callback`) to implement non-blocking software debouncing by comparing system timestamps (`HAL_GetTick`), ensuring clean toggle logic without freezing the system with `HAL_Delay`.
+
+**Q3: Why did I use the specific CAN settings (Prescaler=4, TimeSeg1=15, TimeSeg2=2) and what do they mean?**
+
+**Answer:**
+These settings were calculated to achieve a standard baud rate of **500 kbps**, which is common for High-Speed CAN applications.
+
+* **The Calculation:** My STM32 runs on a 72 MHz system clock (HCLK). The APB1 peripheral clock (PCLK1), which drives the CAN module, is 36 MHz.
+* **Prescaler = 4:** This divides the 36 MHz clock down to a 9 MHz "CAN time quantum" clock.
+* **Time Quanta (TQ):** A single CAN bit is made up of time segments. I configured:
+* Sync Segment: 1 TQ (Fixed)
+* TimeSeg1 (BS1): 15 TQ
+* TimeSeg2 (BS2): 2 TQ
+* **Total:** 1 + 15 + 2 = **18 TQ per bit**.
+
+
+* **Result:**  (500 kbps).
+
+
+* **Sampling Point:** These settings place the sampling point (where the bit is read) at approximately **88.9%** of the bit time. This is a standard configuration for High-Speed CAN to allow for signal propagation delays across the wire while maintaining synchronization.
+
+**Q4: How does the transmission of data packets actually work? How does data move from the sender to the actuator in fine detail?**
+
+**Answer:**
+Data moves through a process involving **Arbitration, Differential Voltage, and Acknowledgment**:
+
+1. **Arbitration:** When the Sender Node wants to transmit (e.g., Door Open `'D'`), the CAN controller checks if the bus is idle. If multiple nodes transmit at once, the one with the lower Message ID (e.g., `0x103`) wins arbitration because "0" (Dominant) overrides "1" (Recessive) on the bus.
+2. **Transceiver Role:** The STM32 CAN controller outputs digital logic (TX pin). The **CAN Transceiver** chip converts this 3.3V logic into a differential voltage:
+* **Logic 0 (Dominant):** CAN_H goes to ~3.5V, CAN_L goes to ~1.5V (Voltage difference  2V).
+* **Logic 1 (Recessive):** Both lines stay at ~2.5V (Voltage difference  0V).
+
+
+3. **Frame Structure:** The message is sent as a frame:
+* **ID (0x103):** Identifies the message content (e.g., "Sensor Status").
+* **DLC (1):** Says "I am sending 1 byte."
+* **Data ('D'):** The actual payload.
+* **CRC:** A checksum to ensure the data wasn't corrupted by noise.
+
+
+4. **Acknowledgment (ACK):** This is the handshake. The Sender transmits a Recessive (1) bit at the end of the frame. If the Actuator Node receives the message and the CRC is correct, it **physically pulls the bus line Low (Dominant)** during this bit time.
+* The Sender sees the bus go Low and knows, "Okay, someone heard me." If it stays High, the Sender assumes a failure and will automatically try again.
+
+
+Here are three additional technical questions that are highly likely to come up because they target specific engineering challenges you solved in this project (Debouncing, Memory Management, and Signal Integrity).
+
+Add these to your notepad:
+
+---
+
+**Q5: I noticed you implemented software debouncing for the button. Why was this necessary, and why did you use a timestamp check instead of a simple delay?**
+
+**Answer:**
+
+* **The Problem:** Mechanical buttons don't close perfectly instantly; they physically "bounce" contacts for a few milliseconds, creating a stream of rapid On/Off signals. Without debouncing, a single press could trigger the interrupt multiple times, toggling the "Armed" state on and off instantly and unpredictably.
+* **Why Timestamp vs. Delay:** A common beginner mistake is to put `HAL_Delay(50)` inside the interrupt to wait for the bouncing to stop. This is bad practice because it "blocks" the CPU inside an interrupt, freezing the entire system (including the CAN communication) for that duration.
+* **My Solution:** I used a **non-blocking timestamp method**. By comparing the current system time (`HAL_GetTick()`) with the `last_button_press` time, I only accept a new interrupt if 200ms has passed. This filters out the mechanical noise without stopping the CPU, making the system "RTOS-ready."
+
+**Q6: You declared the `system_armed` variable as `volatile`. Why was this keyword required, and what would happen if you removed it?**
+
+**Answer:**
+
+* **The Concept:** The `volatile` keyword tells the C compiler: "Do not optimize this variable; always read it from the actual memory address because it can change at any time outside of the main program flow."
+* **The Reason:** The `system_armed` variable is modified inside the Interrupt Service Routine (ISR) but read inside the `main()` `while(1)` loop.
+* **The Risk:** Without `volatile`, the compiler might optimize the `while(1)` loop by caching the value of `system_armed` in a CPU register to run faster. Since the main loop doesn't see any code *inside itself* that changes that variable, it might assume the value never changes. If the interrupt fires and updates the variable in RAM, the main loop would continue using the stale, cached value, and the alarm would never trigger.
+
+**Q7: Physically, why is the 120-ohm termination resistor required on the CAN bus? What happens to the signal if it is missing?**
+
+**Answer:**
+
+* **Impedance Matching:** A standard CAN bus transmission line (twisted pair cable) has a characteristic impedance of approximately 120 ohms. To prevent signal reflections, the ends of the bus must be terminated with a resistor that matches this impedance.
+* **Reflections:** If the resistor is missing, the electrical signal hits the end of the wire and "bounces" back (reflects) like a wave hitting a wall. These reflecting waves collide with incoming data waves, causing destructive interference.
+* **The Consequence:** This interference corrupts the voltage levels, causing the CAN controller to read the wrong bits. This leads to "Error Frames" and the node eventually going "Bus Off" (disconnecting itself) to protect the network.
+* **Recessive State:** The resistors also actively pull the two lines (CAN_H and CAN_L) together to 2.5V when no node is transmitting, ensuring the "Recessive" (Logic 1) state is stable.

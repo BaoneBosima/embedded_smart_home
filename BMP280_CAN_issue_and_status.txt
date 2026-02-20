@@ -1,0 +1,90 @@
+================================================================================
+BMP280 SENSOR OVER CAN – ISSUE SUMMARY, FIXES TRIED, AND CURRENT STATUS
+================================================================================
+Project: Embedded_Environmental (sender_node + actuator_node)
+Sensor: BMP280 (pressure + temperature only; no humidity). SDO to GND → I2C 0x76.
+================================================================================
+
+--------------------------------------------------------------------------------
+1. INITIAL ISSUE
+--------------------------------------------------------------------------------
+
+• BME/BMP sensor data was not visible on the actuator when debugging: no values
+  for temperature, pressure, or humidity.
+
+• Door sensor over CAN worked; buzzer and system arming on the actuator worked.
+  So the problem was specifically sending and receiving the BMP/BME sensor data
+  over CAN.
+
+--------------------------------------------------------------------------------
+2. FIXES APPLIED (CHRONOLOGICAL)
+--------------------------------------------------------------------------------
+
+A) ACTUATOR NODE – so BME values would show up and be received reliably
+   • Made remote_temp, remote_press, remote_hum volatile so the debugger shows
+     up-to-date values.
+   • Added rx_count_103 and rx_count_104 to confirm both CAN IDs (0x103, 0x104)
+     are received.
+   • Changed RX handling to drain the whole FIFO in a while loop so we don’t
+     miss 0x104 when it follows 0x103.
+   • Pressure on actuator: treat received value as Pa and convert to hPa
+     (remote_press /= 100.0f).
+
+B) SENDER NODE – formulas and units
+   • Reduced BME/BMP standby from 1000 ms to 250 ms so readings update more
+     often (temp no longer looked “stuck”).
+   • Pressure scaling: sender sends pressure in Pa; actuator divides by 100
+     for hPa display.
+   • Switched driver to BMP280 (no humidity): removed humidity calibration and
+     ctrl_hum write; read only 6 bytes (P+T); humidity_pct set to 0.0f.
+
+C) SENDER NODE – I2C address and init
+   • Added auto-detect of I2C address: try 0x76 then 0x77 (chip ID 0xD0);
+     use whichever returns BMP280 0x58 or BME280 0x60.
+   • All I2C accesses use the chosen address (bme280_i2c_addr).
+
+D) SENDER NODE – temperature read strategy (multiple attempts)
+   • Two separate 3-byte reads: first from 0xF7 (pressure), then from 0xFA
+     (temperature). Result: temp bytes were [0, 0, 32] → raw_temp = 2 →
+     compensated temp ≈ -102 °C.
+   • Switched to single 6-byte read from 0xF7 (P then T in one transaction).
+     Result: all temperature bytes became 0 (b0, b1, b2 = 0); pressure still
+     worked when it had been read first in the two-read scheme.
+   • Reverted to two 3-byte reads but read TEMPERATURE first (0xFA), then
+     1 ms delay, then PRESSURE (0xF7), to see if the “first read” on this
+     hardware returns valid data.
+
+E) SENDER NODE – debug variables (for debugging on the SENDER)
+   • Added globals to watch in debugger: bme280_debug_addr, bme280_debug_raw_temp,
+     bme280_debug_raw_t_b0/b1/b2, bme280_debug_temp_C. These are updated in
+     BME280_ReadSensor().
+
+--------------------------------------------------------------------------------
+3. CURRENT STATUS (as of last update)
+--------------------------------------------------------------------------------
+
+• Actuator: CAN reception and decoding are correct. rx_count_103 and rx_count_104
+  increase; door and buzzer/arming work. Pressure is converted to hPa on display.
+
+• Sender – I2C address: Correct. bme280_debug_addr = 118 (0x76); SDO to GND is
+  consistent with this.
+
+• Sender – sensor data: BROKEN. After flashing the latest version (temp read
+  first, then 1 ms delay, then pressure read):
+  – bme280_debug_addr     = 118 (0x76)  → OK
+  – bme280_debug_raw_temp = 0           → BAD
+  – bme280_debug_raw_t_b0 = 0           → BAD
+  – bme280_debug_raw_t_b1 = 0           → BAD
+  – bme280_debug_raw_t_b2 = 0           → BAD
+  – bme280_debug_temp_C   = 0           → BAD
+
+  So the BMP280 temperature (and likely pressure) registers are still not being
+  read correctly: either the first I2C read (from 0xFA) is also failing on this
+  board, or both reads fail and only the address detection (single-byte read from
+  0xD0) works.
+
+--------------------------------------------------------------------------------
+
+================================================================================
+End of document.
+================================================================================

@@ -62,6 +62,10 @@ void Error_Handler(void);
 #define PUSH_BUTTON_EXTI_IRQn EXTI1_IRQn
 #define ARM_LED_Pin GPIO_PIN_4
 #define ARM_LED_GPIO_Port GPIOA
+#define green_led_Pin GPIO_PIN_7
+#define green_led_GPIO_Port GPIOC
+#define blue_led_Pin GPIO_PIN_9
+#define blue_led_GPIO_Port GPIOA
 #define ALARM_Pin GPIO_PIN_5
 #define ALARM_GPIO_Port GPIOB
 

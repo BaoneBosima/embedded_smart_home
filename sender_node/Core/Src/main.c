@@ -24,7 +24,7 @@
 #include "bme280.h"
 #include "pir.h"
 #include "door.h"
-
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -55,6 +55,7 @@ HAL_StatusTypeDef status;
 CAN_TxHeaderTypeDef   TxHeader;
 uint8_t               TxData[8];
 uint32_t              TxMailbox;
+uint32_t last_tx_time = 0;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,7 +105,6 @@ int main(void)
   MX_CAN_Init();
   /* USER CODE BEGIN 2 */
     BME280_Init(&hi2c1);
-
     // --- DIAGNOSTIC START ---
 
 
@@ -137,7 +137,7 @@ int main(void)
     HAL_CAN_Start(&hcan);
 
     // --- 3. SETUP HEADER ---
-    TxHeader.DLC = 1; // Length = 1 byte
+    TxHeader.DLC = 5; // Length = 1 byte
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
     TxHeader.StdId = 0x103; // ID = 0x103
@@ -147,41 +147,61 @@ int main(void)
 
   /* Infinite loop */
     /* USER CODE BEGIN WHILE */
-      while (1)
-      {
-        // Read BME280 sensor data (keep this active)
+    while (1)
+    {
         BME280_ReadSensor(&sensor_data);
 
-        // --- STEP 1: DOOR LOGIC ---
-        // Check the door status using your door.h library or direct GPIO read
-        if (HAL_GPIO_ReadPin(DOOR_SENSOR_GPIO_Port, DOOR_SENSOR_Pin) == GPIO_PIN_RESET)
+        // Send data every 500ms (prevent flooding the bus)
+        if (HAL_GetTick() - last_tx_time > 500)
+        	last_tx_time = HAL_GetTick();
         {
-            // Door is OPEN (Assuming pull-up configuration where Open = Ground/0)
-            TxData[0] = 'D'; // 'D' for Door Open
-            HAL_GPIO_TogglePin(onboard_LED_GPIO_Port, onboard_LED_Pin);
-        }
-        else
-        {
-            // Door is CLOSED
-            TxData[0] = 'C'; // 'C' for Closed
-        }
+            // --- MESSAGE 1: ID 0x103 (Door + PIR + Temperature) ---
+            TxHeader.StdId = 0x103;
+            TxHeader.DLC = 6; // 1 byte Door + 1 byte PIR + 4 bytes Temp
 
-        // --- STEP 2: CAN SEND ---
-        // Check if a transmit mailbox is free
-        if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0)
-        {
-            // Send the door state ('D' or 'C') to ID 0x103
-            if (HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox) == HAL_OK)
-            {
-                // Flash local LED to show a message was sent
-                HAL_GPIO_TogglePin(onboard_LED_GPIO_Port, onboard_LED_Pin);
+            // Byte 0: Door Status
+            if (HAL_GPIO_ReadPin(DOOR_SENSOR_GPIO_Port, DOOR_SENSOR_Pin) == GPIO_PIN_RESET) {
+                TxData[0] = 'D'; // Open
+            } else {
+                TxData[0] = 'C'; // Closed
             }
-        }
 
-        HAL_Delay(100); // 100ms delay (10 times a second) is plenty for a door sensor
-      }
-      /* USER CODE END WHILE */
+            // Byte 1: PIR motion (1 = motion, 0 = no motion)
+            TxData[1] = (PIR_GetStatus() == PIR_MOTION_DETECTED) ? 1 : 0;
 
+            // Bytes 2-5: Temperature (float)
+            memcpy(&TxData[2], &sensor_data.temperature_C, 4);
+
+            if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0) {
+                HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+                HAL_GPIO_TogglePin(onboard_LED_GPIO_Port, onboard_LED_Pin); // Blink on send
+            }
+
+            HAL_Delay(10); // Small delay between messages
+
+            // --- MESSAGE 2: ID 0x104 (Pressure + Humidity) ---
+            TxHeader.StdId = 0x104;
+            TxHeader.DLC = 8; // 4 bytes Pressure + 4 bytes Humidity
+
+            // Bytes 0-3: Pressure
+            memcpy(&TxData[0], &sensor_data.pressure_hPa, 4);
+
+            // Bytes 4-7: Humidity
+            memcpy(&TxData[4], &sensor_data.humidity_pct, 4);
+
+            // Wait until a mailbox becomes available before dropping the next message
+            uint32_t timeout = HAL_GetTick();
+            while (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) == 0) {
+                if (HAL_GetTick() - timeout > 10) {
+                    break; // Timeout! Escape the loop.
+                }
+            }
+            // Only add the message if we actually broke out because a mailbox opened
+            if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0) {
+                HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+            }}
+    }
+    /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */
   // }
   /* USER CODE END 3 */

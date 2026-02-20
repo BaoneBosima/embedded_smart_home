@@ -1,9 +1,8 @@
 /*
  * bme280.c
  *
- * Created on: Feb 3, 2026
- * Author: Bmbosima
- * Email:bmbosima@uwaterloo.ca
+ *  Created on: Feb 3, 2026
+ *      Author: bmbosima
  */
 
 #include "bme280.h"
@@ -12,7 +11,16 @@
 static I2C_HandleTypeDef *hi2c_bme; // Local pointer to the I2C handle
 static int32_t t_fine;              // Global temperature value for pressure comp
 
-// Calibration Data (Factory constants)(uniquie to my bme sensor so use your own data sheet values.
+// --- Debug Variables (watch in live expressions) ---
+volatile uint8_t  bme280_debug_raw_data[8] = {0};  // Raw 8 bytes from 0xF7-0xFE
+volatile int32_t  bme280_debug_raw_temp = 0;       // 20-bit raw temperature
+volatile int32_t  bme280_debug_raw_press = 0;      // 20-bit raw pressure
+volatile int32_t  bme280_debug_raw_hum = 0;        // 16-bit raw humidity
+volatile float    bme280_debug_temp_C = 0.0f;       // Compensated temperature (°C)
+volatile float    bme280_debug_press_hPa = 0.0f;   // Compensated pressure (hPa)
+volatile float    bme280_debug_hum_pct = 0.0f;     // Compensated humidity (%)
+
+// Calibration Data (Factory constants)
 static struct {
 	uint16_t dig_T1;
 	int16_t dig_T2;
@@ -36,7 +44,6 @@ static struct {
 
 
 // --- Private Helper Functions (Compensation Math) ---
-// These are 'static' so they cannot be called from main.c
 
 static void BME280_ReadCalibration(void) {
 	uint8_t calib[26];
@@ -130,12 +137,27 @@ void BME280_ReadSensor(BME280_Data *data) {
 	// Burst Read 0xF7 to 0xFE
 	HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0xF7, 1, raw_data, 8, HAL_MAX_DELAY);
 
+	// Copy to debug array for live expressions
+	for (int i = 0; i < 8; i++) {
+		bme280_debug_raw_data[i] = raw_data[i];
+	}
+
 	raw_press = (raw_data[0] << 12) | (raw_data[1] << 4) | (raw_data[2] >> 4);
 	raw_temp  = (raw_data[3] << 12) | (raw_data[4] << 4) | (raw_data[5] >> 4);
 	raw_hum   = (raw_data[6] << 8) | raw_data[7];
+
+	// Update debug variables
+	bme280_debug_raw_press = raw_press;
+	bme280_debug_raw_temp  = raw_temp;
+	bme280_debug_raw_hum   = raw_hum;
 
 	// Convert and store in the struct
 	data->temperature_C = BME280_Compensate_T(raw_temp) / 100.0f;
 	data->pressure_hPa = BME280_Compensate_P(raw_press) / 256.0f;
 	data->humidity_pct = BME280_Compensate_H(raw_hum) / 1024.0f;
+
+	// Update debug compensated values
+	bme280_debug_temp_C   = data->temperature_C;
+	bme280_debug_press_hPa = data->pressure_hPa;
+	bme280_debug_hum_pct  = data->humidity_pct;
 }

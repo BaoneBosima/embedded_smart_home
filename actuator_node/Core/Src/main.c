@@ -11,7 +11,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -21,7 +21,12 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+// User preferred temperature (°C). Below this = heater (blue), above = fan (green).
+#define PREFERRED_TEMP_C        22.0f
+// No motion for this many ms -> turn off heater/fan.
+#define NO_MOTION_TIMEOUT_MS    30000U
+// Blink period for heater/fan LED when active (ms).
+#define ACTUATOR_BLINK_MS       500U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -31,14 +36,25 @@
 
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan;
-// RTOS-Ready Flag: 1 = Armed, 0 = Disarmed
-volatile uint8_t system_armed = 0;
 
-// Debounce timestamp
-volatile uint32_t last_button_press = 0;
 /* USER CODE BEGIN PV */
 CAN_RxHeaderTypeDef   RxHeader;
 uint8_t               RxData[8];
+
+volatile uint8_t  system_armed = 0;           // 1 = armed, 0 = disarmed (arm button)
+volatile uint32_t last_button_press = 0;      // Debounce for arm button
+
+volatile float remote_temp = 0.0f;
+volatile float remote_press = 0.0f;
+volatile float remote_hum = 0.0f;
+volatile uint8_t remote_door_open = 0;       // 1 = 'D' (open), 0 = 'C' (closed)
+volatile uint8_t remote_pir_motion = 0;       // 1 = motion, 0 = no motion
+volatile uint32_t last_motion_tick = 0;      // Last time we received PIR=1 (for timeout)
+
+volatile uint32_t rx_count_103 = 0;
+volatile uint32_t rx_count_104 = 0;
+
+uint32_t last_heater_fan_blink = 0;         // For blinking blue/green when active
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -111,29 +127,77 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
+    {
+      // Drain all pending CAN messages so we don't miss 0x104 when it follows 0x103
+      while (HAL_CAN_GetRxFifoFillLevel(&hcan, CAN_RX_FIFO0) > 0)
       {
-        if (HAL_CAN_GetRxFifoFillLevel(&hcan, CAN_RX_FIFO0) > 0)
-        {
-          HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &RxHeader, RxData);
+        HAL_CAN_GetRxMessage(&hcan, CAN_RX_FIFO0, &RxHeader, RxData);
 
-          // LOGIC: Only buzz if Door is Open (D) AND System is Armed
-          if (RxData[0] == 'D')
-          {
-              if (system_armed == 1)
-              {
-                  Buzzer_On();
-                  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_SET); // Green LED
-              }
-              // If system_armed is 0, we do nothing (ignore the intruder!)
-          }
-          else if (RxData[0] == 'C')
-          {
-              // Door closed - always safe to turn off buzzer
-              Buzzer_Off();
-              HAL_GPIO_WritePin(GPIOA, GPIO_PIN_5, GPIO_PIN_RESET);
-          }
+        // Toggle Traffic LED
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);
+
+        if (RxHeader.StdId == 0x103)
+        {
+            // --- DECODE MESSAGE 1 (Door + PIR + Temp), DLC 6 ---
+            rx_count_103++;
+
+            remote_door_open = (RxData[0] == 'D') ? 1 : 0;
+            remote_pir_motion = (RxData[1] != 0) ? 1 : 0;
+            if (remote_pir_motion) {
+                last_motion_tick = HAL_GetTick();
+            }
+            memcpy((void *)&remote_temp, &RxData[2], 4);
+
+            // Alarm: armed and (door open OR PIR motion) -> buzzer
+            if (system_armed && (remote_door_open || remote_pir_motion)) {
+                Buzzer_On();
+            } else {
+                Buzzer_Off();
+            }
+        }
+        else if (RxHeader.StdId == 0x104)
+        {
+            // --- DECODE MESSAGE 2 (Pressure + Humidity) ---
+            rx_count_104++;
+
+            // 1. Pressure: sender sends in Pa (BMP280); convert to hPa for display
+            memcpy((void *)&remote_press, &RxData[0], 4);
+            remote_press /= 100.0f;   // Pa -> hPa (e.g. 146059 -> 1460.59)
+
+            // 2. Handle Humidity (bytes 4-7)
+            memcpy((void *)&remote_hum, &RxData[4], 4);
         }
       }
+
+      // --- Heater/Fan actuators: only when motion recently; off after no-motion timeout ---
+      uint32_t now = HAL_GetTick();
+      // Require at least one PIR=1 ever (last_motion_tick != 0); else heater/fan stay off at boot
+      uint8_t motion_active = (last_motion_tick != 0 && (now - last_motion_tick <= NO_MOTION_TIMEOUT_MS)) ? 1 : 0;
+
+      if (!motion_active) {
+          HAL_GPIO_WritePin(blue_led_GPIO_Port, blue_led_Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
+      } else {
+          if (remote_temp < PREFERRED_TEMP_C) {
+              // Heater (blue): blink when cold
+              if (now - last_heater_fan_blink >= ACTUATOR_BLINK_MS) {
+                  HAL_GPIO_TogglePin(blue_led_GPIO_Port, blue_led_Pin);
+                  last_heater_fan_blink = now;
+              }
+              HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
+          } else if (remote_temp > PREFERRED_TEMP_C) {
+              // Fan (green): blink when hot
+              if (now - last_heater_fan_blink >= ACTUATOR_BLINK_MS) {
+                  HAL_GPIO_TogglePin(green_led_GPIO_Port, green_led_Pin);
+                  last_heater_fan_blink = now;
+              }
+              HAL_GPIO_WritePin(blue_led_GPIO_Port, blue_led_Pin, GPIO_PIN_RESET);
+          } else {
+              HAL_GPIO_WritePin(blue_led_GPIO_Port, blue_led_Pin, GPIO_PIN_RESET);
+              HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
+          }
+      }
+    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -230,10 +294,14 @@ static void MX_GPIO_Init(void)
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, ARM_LED_Pin|GPIO_PIN_5, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, ARM_LED_Pin|GPIO_PIN_5|blue_led_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(ALARM_GPIO_Port, ALARM_Pin, GPIO_PIN_RESET);
@@ -244,12 +312,19 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(PUSH_BUTTON_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ARM_LED_Pin PA5 */
-  GPIO_InitStruct.Pin = ARM_LED_Pin|GPIO_PIN_5;
+  /*Configure GPIO pins : ARM_LED_Pin PA5 blue_led_Pin */
+  GPIO_InitStruct.Pin = ARM_LED_Pin|GPIO_PIN_5|blue_led_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : green_led_Pin */
+  GPIO_InitStruct.Pin = green_led_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(green_led_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : ALARM_Pin */
   GPIO_InitStruct.Pin = ALARM_Pin;
@@ -294,6 +369,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     }
 }
 /* USER CODE END 4 */
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
