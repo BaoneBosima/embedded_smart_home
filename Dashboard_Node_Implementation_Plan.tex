@@ -1,0 +1,887 @@
+\documentclass[11pt,a4paper]{article}
+
+% --- Packages ---
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{titlesec}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{fancyhdr}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{tcolorbox}
+
+% --- Colours ---
+\definecolor{codegreen}{rgb}{0.25,0.49,0.37}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codeblue}{rgb}{0.13,0.29,0.53}
+\definecolor{backcolour}{rgb}{0.95,0.95,0.95}
+\definecolor{accentblue}{rgb}{0.12,0.31,0.57}
+
+% --- Code listing style ---
+\lstdefinestyle{cstyle}{
+  backgroundcolor=\color{backcolour},
+  commentstyle=\color{codegreen}\itshape,
+  keywordstyle=\color{codeblue}\bfseries,
+  stringstyle=\color{red!60!black},
+  basicstyle=\ttfamily\small,
+  breakatwhitespace=false,
+  breaklines=true,
+  captionpos=b,
+  keepspaces=true,
+  showspaces=false,
+  showstringspaces=false,
+  showtabs=false,
+  tabsize=4,
+  frame=single,
+  rulecolor=\color{gray!40},
+  language=C,
+  morekeywords={uint8_t,uint16_t,uint32_t,int8_t,int16_t,int32_t,
+                float,volatile,extern,const,void,
+                HAL_StatusTypeDef,CAN_HandleTypeDef,CAN_FilterTypeDef,
+                CAN_TxHeaderTypeDef,CAN_RxHeaderTypeDef,
+                GPIO_InitTypeDef,GPIO_TypeDef,GPIO_PinState,
+                osThreadId_t,osThreadAttr_t,osMutexId_t,osMutexAttr_t,
+                osSemaphoreId_t,osSemaphoreAttr_t,osStatus_t,osPriority_t,
+                TIM_HandleTypeDef,
+                struct_netconn,struct_netbuf,err_t,ip_addr_t}
+}
+\lstset{style=cstyle}
+
+% --- Header / Footer ---
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\textbf{Dashboard Node Implementation Plan}}
+\rhead{STM32F767ZI $|$ LwIP $|$ FreeRTOS}
+\cfoot{Page \thepage/13}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% --- Section formatting ---
+\titleformat{\section}{\Large\bfseries\color{accentblue}}{}{0em}{}[\vspace{-0.5em}\rule{\textwidth}{0.4pt}]
+\titleformat{\subsection}{\large\bfseries\color{accentblue}}{}{0em}{}
+
+% --- Highlight box ---
+\newtcolorbox{infobox}[1][]{
+  colback=blue!5,
+  colframe=accentblue,
+  fonttitle=\bfseries,
+  title={#1},
+  arc=2pt,
+  boxrule=0.5pt
+}
+
+\newtcolorbox{warnbox}[1][]{
+  colback=red!5,
+  colframe=red!60!black,
+  fonttitle=\bfseries,
+  title={#1},
+  arc=2pt,
+  boxrule=0.5pt
+}
+
+% ======================================================================
+\begin{document}
+
+% --- Title Page ---
+\begin{center}
+  \vspace*{1.5cm}
+  {\Huge\bfseries\color{accentblue} Dashboard Node\\[0.3em] Implementation Plan}\\[1.5em]
+  {\Large Add an Ethernet Web Server to the Environmental Monitor}\\[1em]
+  {\large STM32F767ZI (NUCLEO-144) $|$ FreeRTOS CMSIS-RTOS v2 $|$ LwIP Netconn $|$ CAN Bus}\\[2em]
+  \rule{0.8\textwidth}{0.4pt}\\[1.5em]
+  {\large\textbf{Project:} Embedded Environmental Monitoring System}\\[0.5em]
+  {\large\textbf{Scope:} Add a 3rd CAN node with Ethernet dashboard}\\[0.5em]
+  {\large\textbf{Board:} NUCLEO-F767ZI (Cortex-M7, 216\,MHz, 2\,MB Flash, 512\,KB SRAM)}\\[0.5em]
+  {\large\textbf{Key Middleware:} FreeRTOS + LwIP (Lightweight TCP/IP)}\\[2em]
+  \rule{0.8\textwidth}{0.4pt}
+\end{center}
+
+\vfill
+
+\subsection*{Implementation Checklist}
+\begin{enumerate}[leftmargin=2em]
+  \item Create STM32CubeMX project for F767ZI: enable FreeRTOS, LwIP, ETH, CAN1, TIM6 timebase, MPU
+  \item Configure CAN1 timing for 500\,kbps (must match sender and actuator nodes)
+  \item Configure LwIP: enable Netconn API, DHCP or static IP, adjust memory pools
+  \item Implement \texttt{canRxTask}: poll CAN FIFO, parse 0x103/0x104/0x105, update shared state
+  \item Implement \texttt{http\_server.c}: LwIP Netconn TCP server, serve HTML, JSON API, parse POST commands
+  \item Implement CAN TX helper functions: send 0x200 (arm/disarm) and 0x201 (set temperature)
+  \item Write embedded HTML/CSS/JS dashboard page with live auto-refresh
+  \item Modify actuator node: handle 0x200/0x201, make target temp runtime-variable, add status TX (0x105)
+  \item Wire all three nodes to the same CAN bus, connect Ethernet, test end-to-end
+\end{enumerate}
+
+\newpage
+
+% ======================================================================
+\section{Overview: What We Are Building and Why}
+% ======================================================================
+
+\subsection*{The Problem}
+The current system has two nodes: a Sender (sensors) and an Actuator (buzzer, LEDs). There is no way to see the system status remotely or issue commands without physically pressing the button on the actuator board. If the system is deployed in a real environment (e.g., a server room or greenhouse), you would need to walk to the board every time you want to check the temperature or arm/disarm the alarm.
+
+\subsection*{The Solution}
+Add a third node --- the \textbf{Dashboard Node} --- running on a NUCLEO-F767ZI. This board has a built-in Ethernet jack (via the onboard LAN8742A PHY). It connects to the same CAN bus as the other two nodes and simultaneously connects to the local network via Ethernet. It runs a web server that any browser on the network can access.
+
+\subsection*{Why the STM32F767ZI?}
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Ethernet built-in:} The NUCLEO-144 board includes an Ethernet RJ45 connector and the LAN8742A PHY chip --- no external Ethernet module needed.
+  \item \textbf{CAN peripheral:} The F767ZI has CAN1 and CAN2. We use CAN1 to join the same bus as the existing nodes.
+  \item \textbf{Powerful CPU:} Cortex-M7 at 216\,MHz with 512\,KB SRAM handles the TCP/IP stack, web serving, and CAN processing simultaneously.
+  \item \textbf{LwIP support:} STMicroelectronics provides the LwIP (Lightweight IP) middleware integrated with CubeMX, giving us a full TCP/IP stack with minimal configuration.
+\end{itemize}
+
+\subsection*{What is LwIP?}
+LwIP (Lightweight IP) is an open-source TCP/IP stack designed for embedded systems. It provides:
+\begin{itemize}[leftmargin=2em]
+  \item TCP and UDP protocols (we use TCP for HTTP)
+  \item DHCP client (auto-assigns an IP address from your router)
+  \item A \textbf{Netconn API} --- a high-level, blocking socket-like interface ideal for RTOS tasks. A task can call \texttt{netconn\_accept()} and block (sleeping, zero CPU) until a browser connects.
+  \item DNS, ICMP (ping), and other standard networking features
+\end{itemize}
+
+LwIP runs its own internal thread (\texttt{tcpip\_thread}) which the middleware creates automatically. Our HTTP server task communicates with it through the Netconn API.
+
+\subsection*{System Architecture (3-Node CAN Network)}
+\begin{verbatim}
+  [Sender Node F303] ---+--- CAN Bus (500 kbps) ---+--- [Dashboard Node F767ZI]
+   BME280, PIR, Door    |                           |    CAN + Ethernet Web Server
+                        |                           |           |
+                  [Actuator Node F303]              |       [Browser]
+                   Buzzer, LEDs, Button             |    192.168.x.x:80
+                        |                           |
+                        +---------------------------+
+\end{verbatim}
+
+All three nodes share the same CAN bus (CAN\_H, CAN\_L, GND). The dashboard passively listens to sensor data (0x103, 0x104) and actuator status (0x105), and transmits command messages (0x200, 0x201) when the user interacts with the web page.
+
+\newpage
+
+% ======================================================================
+\section{Step 1: CubeMX Project Setup}
+% ======================================================================
+
+Open STM32CubeMX and create a new project.
+
+\subsection{1a. Select the Board}
+\begin{itemize}[leftmargin=2em]
+  \item Click \textbf{New Project} $\rightarrow$ \textbf{Board Selector} tab
+  \item Search for \textbf{NUCLEO-F767ZI} and select it
+  \item This pre-configures many pins including the Ethernet RMII pins and onboard LED (PB0)
+\end{itemize}
+
+\begin{infobox}[Why Board Selector?]
+Using Board Selector instead of MCU Selector automatically configures the Ethernet RMII pin mapping for the Nucleo-144 board layout. Doing this manually is error-prone --- there are 9 Ethernet pins that must match the PCB traces to the LAN8742A PHY.
+\end{infobox}
+
+\subsection{1b. Change HAL Timebase to TIM6}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{System Core} $\rightarrow$ \textbf{SYS}
+  \item Change \textbf{Timebase Source} from \texttt{SysTick} to \texttt{TIM6}
+\end{itemize}
+
+\begin{infobox}[Why TIM6?]
+Same reason as on your actuator node: FreeRTOS takes ownership of SysTick for its scheduler tick interrupt. The HAL library also needs a millisecond counter (\texttt{HAL\_GetTick}), so we redirect it to TIM6. Without this change, both FreeRTOS and HAL would try to define \texttt{SysTick\_Handler}, causing a ``multiple definition'' linker error.
+\end{infobox}
+
+\subsection{1c. Enable FreeRTOS}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{Middleware and Software Packs} $\rightarrow$ \textbf{FREERTOS}
+  \item Set Interface to \textbf{CMSIS\_V2} (same wrapper as your actuator node)
+  \item In \textbf{Config Parameters}:
+  \begin{itemize}
+    \item \texttt{configTOTAL\_HEAP\_SIZE} = \textbf{32768} (32\,KB)
+    \item \texttt{configUSE\_MUTEXES} = Enabled
+    \item \texttt{configUSE\_COUNTING\_SEMAPHORES} = Enabled
+    \item \texttt{configTICK\_RATE\_HZ} = 1000
+  \end{itemize}
+\end{itemize}
+
+\begin{infobox}[Why 32\,KB Heap (vs. 8\,KB on the actuator)?]
+LwIP dynamically allocates memory for TCP connections, packet buffers, and network control blocks. Each incoming HTTP connection consumes roughly 1--2\,KB of heap. Combined with FreeRTOS task stacks and LwIP internal pools, 32\,KB provides comfortable headroom. The F767ZI has 512\,KB SRAM, so this is a small fraction.
+\end{infobox}
+
+\subsection{1d. Enable Ethernet (ETH)}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{Connectivity} $\rightarrow$ \textbf{ETH}
+  \item Select \textbf{RMII} mode (Reduced Media Independent Interface)
+  \item CubeMX auto-assigns the 9 RMII pins: PA1, PA2, PA7, PB13, PC1, PC4, PC5, PG11, PG13
+  \item In the \textbf{NVIC Settings} tab: enable the \textbf{Ethernet global interrupt}, set priority to \textbf{5}
+\end{itemize}
+
+\begin{infobox}[What is RMII?]
+RMII (Reduced Media Independent Interface) is a 7-pin interface between the STM32's built-in Ethernet MAC (Media Access Controller) and the external PHY chip (LAN8742A on the Nucleo board). The MAC handles the TCP/IP framing in hardware; the PHY handles the electrical signalling on the Ethernet cable. RMII is ``reduced'' because it uses fewer pins than the full MII interface (7 vs. 16), at the cost of requiring a 50\,MHz reference clock.
+\end{infobox}
+
+\newpage
+
+\subsection{1e. Enable LwIP}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{Middleware and Software Packs} $\rightarrow$ \textbf{LWIP}
+  \item Enable it (checkbox)
+  \item In \textbf{General Settings}:
+  \begin{itemize}
+    \item \texttt{LWIP\_DHCP} = \textbf{Enabled} (auto-assigns IP from your router)
+    \item OR for a fixed IP: \texttt{IP\_ADDRESS} = 192.168.1.50, \texttt{NETMASK} = 255.255.255.0, \texttt{GW\_ADDRESS} = 192.168.1.1
+  \end{itemize}
+  \item In \textbf{Key Options}:
+  \begin{itemize}
+    \item \texttt{LWIP\_TCP} = Enabled (needed for HTTP)
+    \item \texttt{LWIP\_NETCONN} = \textbf{Enabled} (high-level blocking API for RTOS)
+    \item \texttt{MEM\_SIZE} = \textbf{16384} (16\,KB internal memory pool for LwIP)
+    \item \texttt{MEMP\_NUM\_TCP\_PCB} = 10 (max simultaneous TCP connections)
+    \item \texttt{MEMP\_NUM\_NETCONN} = 10 (max Netconn objects)
+  \end{itemize}
+\end{itemize}
+
+\begin{infobox}[DHCP vs. Static IP]
+\textbf{DHCP} is easier --- plug in the Ethernet cable, and the board gets an IP automatically. But you need to check your router's admin page to find out what IP was assigned. \textbf{Static IP} is predictable --- you always know the address is 192.168.1.50 --- but you must ensure no other device on your network uses that address. For development, static IP is often simpler.
+\end{infobox}
+
+\subsection{1f. Enable CAN1}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{Connectivity} $\rightarrow$ \textbf{CAN1}
+  \item Activate it
+  \item The default pins on NUCLEO-F767ZI are \textbf{PD0} (CAN1\_RX) and \textbf{PD1} (CAN1\_TX)
+  \item Configure bit timing for \textbf{500\,kbps}:
+\end{itemize}
+
+\begin{infobox}[CAN Timing Calculation for F767ZI]
+The CAN peripheral clock comes from APB1. With the default clock tree:
+\begin{itemize}
+  \item HCLK = 216\,MHz, APB1 prescaler = /4 $\rightarrow$ APB1 = 54\,MHz
+  \item CAN Prescaler = \textbf{6} $\rightarrow$ Time Quantum = 54\,MHz / 6 = 9\,MHz
+  \item Sync = 1\,TQ, BS1 = \textbf{14}\,TQ, BS2 = \textbf{3}\,TQ $\rightarrow$ Total = 18\,TQ
+  \item Baud = 9\,MHz / 18 = \textbf{500\,kbps} (matches the F303 nodes)
+  \item Sampling point = (1 + 14) / 18 = 83.3\% (acceptable for high-speed CAN)
+\end{itemize}
+\textbf{Critical:} All three nodes on the bus \emph{must} run at exactly the same baud rate. If the F767ZI and F303 disagree by even 1\%, communication will fail with error frames.
+\end{infobox}
+
+\subsection{1g. Configure MPU (Memory Protection Unit)}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{System Core} $\rightarrow$ \textbf{CORTEX\_M7}
+  \item Enable \textbf{CPU ICache} and \textbf{CPU DCache}
+  \item Enable the \textbf{MPU} and configure a region for Ethernet DMA buffers as \textbf{non-cacheable}
+\end{itemize}
+
+\begin{warnbox}[Why is MPU Configuration Critical on F7?]
+The Cortex-M7 has a data cache (D-Cache) that sits between the CPU and RAM. The Ethernet DMA controller \emph{also} reads/writes RAM directly, bypassing the cache. Without the MPU marking the DMA buffer region as non-cacheable, the CPU and DMA see different data --- the CPU reads stale cached values while the DMA has written fresh data to RAM. This causes packets to be silently corrupted. Symptoms: Ethernet appears to ``work'' but TCP connections randomly fail or the web page loads partially. This is the single most common reason LwIP fails on STM32F7.
+\end{warnbox}
+
+\newpage
+
+\subsection{1h. Configure Clock Tree}
+\begin{itemize}[leftmargin=2em]
+  \item Go to the \textbf{Clock Configuration} tab
+  \item Set HCLK to \textbf{216\,MHz} (max for F767ZI)
+  \item APB1 prescaler = /4 $\rightarrow$ \textbf{54\,MHz} (max for APB1; this clocks CAN and TIM6)
+  \item APB2 prescaler = /2 $\rightarrow$ \textbf{108\,MHz}
+  \item Ensure the 48\,MHz output is valid (needed by some USB/RNG peripherals)
+\end{itemize}
+
+\subsection{1i. Generate Code}
+\begin{itemize}[leftmargin=2em]
+  \item Go to \textbf{Project Manager}
+  \item Project Name: \texttt{dashboard\_node}
+  \item Project Location: your \texttt{Embedded\_Envronmental} folder
+  \item Toolchain: \textbf{STM32CubeIDE}
+  \item Click \textbf{Generate Code}
+\end{itemize}
+
+CubeMX will create the project with all middleware included: FreeRTOS kernel, LwIP stack, Ethernet driver, CAN driver, and all HAL sources.
+
+\newpage
+
+% ======================================================================
+\section{Step 2: CAN Message Protocol Extension}
+% ======================================================================
+
+The existing CAN protocol uses two message IDs. We add three new ones.
+
+\subsection*{Complete Message Table}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llllp{7cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Direction} & \textbf{DLC} & \textbf{New?} & \textbf{Payload} \\
+\midrule
+\texttt{0x103} & Sender $\rightarrow$ All & 6 & No & Byte\,0: Door (\texttt{'D'}/\texttt{'C'}), Byte\,1: PIR (0/1), Bytes\,2--5: Temperature (float) \\
+\texttt{0x104} & Sender $\rightarrow$ All & 8 & No & Bytes\,0--3: Pressure (float), Bytes\,4--7: Humidity (float) \\
+\texttt{0x105} & Actuator $\rightarrow$ Dashboard & 6 & \textbf{Yes} & Byte\,0: armed (0/1), Byte\,1: alarm\_active (0/1), Bytes\,2--5: target\_temp (float) \\
+\texttt{0x200} & Dashboard $\rightarrow$ Actuator & 1 & \textbf{Yes} & Byte\,0: \texttt{0x01}=ARM, \texttt{0x02}=DISARM \\
+\texttt{0x201} & Dashboard $\rightarrow$ Actuator & 4 & \textbf{Yes} & Bytes\,0--3: New target temperature (float via memcpy) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{infobox}[Why Separate Command and Feedback Messages?]
+The dashboard sends a \emph{command} (0x200: ``please arm''). The actuator receives it, changes state, then sends \emph{feedback} (0x105: ``I am now armed''). The dashboard does not assume the command worked --- it waits for confirmation. This is the standard command/acknowledge pattern used in automotive and industrial CAN networks. It handles the case where a CAN message is lost (noise, bus error): the dashboard can show ``Pending\ldots'' until the feedback arrives.
+\end{infobox}
+
+\begin{infobox}[Why 0x200/0x201 (Higher IDs)?]
+On a CAN bus, lower message IDs have higher arbitration priority. By giving sensor data IDs 0x103--0x105 (lower) and command IDs 0x200--0x201 (higher), sensor data always wins bus arbitration over commands. This is intentional: real-time sensor updates are more time-critical than occasional user commands.
+\end{infobox}
+
+\newpage
+
+% ======================================================================
+\section{Step 3: Dashboard Node Software Architecture}
+% ======================================================================
+
+\subsection{FreeRTOS Tasks}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lllp{7.5cm}@{}}
+\toprule
+\textbf{Task} & \textbf{Priority} & \textbf{Stack} & \textbf{Role} \\
+\midrule
+\texttt{canRxTask} & AboveNormal & 256$\times$4 & Poll CAN FIFO every 10\,ms, parse messages, update shared state under mutex \\
+\texttt{httpServerTask} & Normal & 512$\times$4 & LwIP Netconn TCP server on port 80. Serves HTML, JSON API, processes POST commands \\
+\texttt{statusLedTask} & BelowNormal & 128$\times$4 & Toggle onboard LD1 every 500\,ms as a heartbeat indicator \\
+\texttt{tcpip\_thread} & (internal) & (lwipopts.h) & LwIP core processing thread --- created automatically by the middleware \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{infobox}[Why Does httpServerTask Need 2\,KB Stack?]
+The HTTP server task builds response strings (\texttt{snprintf} into local buffers), parses incoming HTTP requests, and calls LwIP Netconn functions which themselves use stack space internally. A 512-byte stack would overflow immediately. 2\,KB (512$\times$4) provides safe headroom. You can verify this at runtime using \texttt{uxTaskGetStackHighWaterMark()}.
+\end{infobox}
+
+\subsection{Shared State Variables}
+Same pattern as your actuator node: \texttt{volatile} globals protected by a mutex.
+
+\begin{lstlisting}
+/* Shared sensor data -- written by canRxTask, read by httpServerTask */
+volatile float    dash_temp        = 0.0f;
+volatile float    dash_press       = 0.0f;
+volatile float    dash_hum         = 0.0f;
+volatile uint8_t  dash_door_open   = 0;
+volatile uint8_t  dash_pir_motion  = 0;
+volatile uint8_t  dash_armed       = 0;
+volatile uint8_t  dash_alarm       = 0;
+volatile float    dash_target_temp = 22.0f;
+
+osMutexId_t dashDataMutexHandle;
+\end{lstlisting}
+
+\subsection{CAN Receive Task}
+Identical pattern to your actuator node's \texttt{canRxTask}, but also handles ID \texttt{0x105} (status feedback from actuator):
+
+\begin{lstlisting}
+void StartCanRxTask(void *argument) {
+  for (;;) {
+    while (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) > 0) {
+      HAL_CAN_GetRxMessage(&hcan1, CAN_RX_FIFO0, &RxHeader, RxData);
+
+      osMutexAcquire(dashDataMutexHandle, osWaitForever);
+
+      if (RxHeader.StdId == 0x103) {
+        dash_door_open  = (RxData[0] == 'D') ? 1 : 0;
+        dash_pir_motion = (RxData[1] != 0)   ? 1 : 0;
+        memcpy((void *)&dash_temp, &RxData[2], 4);
+      }
+      else if (RxHeader.StdId == 0x104) {
+        memcpy((void *)&dash_press, &RxData[0], 4);
+        memcpy((void *)&dash_hum,   &RxData[4], 4);
+      }
+      else if (RxHeader.StdId == 0x105) {
+        dash_armed       = RxData[0];
+        dash_alarm       = RxData[1];
+        memcpy((void *)&dash_target_temp, &RxData[2], 4);
+      }
+
+      osMutexRelease(dashDataMutexHandle);
+    }
+    osDelay(10);
+  }
+}
+\end{lstlisting}
+
+\newpage
+
+% ======================================================================
+\section{Step 4: HTTP Web Server Implementation}
+% ======================================================================
+
+\subsection{What is the Netconn API?}
+LwIP provides three programming interfaces:
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Raw API} --- callback-based, no blocking, lowest overhead, hardest to use
+  \item \textbf{Netconn API} --- blocking socket-like calls, requires an RTOS, easiest to use
+  \item \textbf{Socket API} --- BSD socket compatibility layer on top of Netconn (more overhead)
+\end{enumerate}
+
+We use \textbf{Netconn} because it maps naturally onto FreeRTOS tasks: the server task blocks on \texttt{netconn\_accept()} (zero CPU usage) until a browser connects, then blocks on \texttt{netconn\_recv()} until the HTTP request arrives.
+
+\subsection{Server Structure}
+
+\begin{lstlisting}
+#include "lwip/api.h"
+
+void http_server_init(void) {
+  struct netconn *conn, *newconn;
+  struct netbuf *inbuf;
+  char *buf;
+  u16_t buflen;
+
+  /* Create a TCP connection object */
+  conn = netconn_new(NETCONN_TCP);
+
+  /* Bind to port 80 (HTTP) on all network interfaces */
+  netconn_bind(conn, IP_ADDR_ANY, 80);
+
+  /* Start listening for incoming connections */
+  netconn_listen(conn);
+
+  for (;;) {
+    /* Block until a browser connects (zero CPU while waiting) */
+    if (netconn_accept(conn, &newconn) == ERR_OK) {
+
+      /* Read the HTTP request from the browser */
+      if (netconn_recv(newconn, &inbuf) == ERR_OK) {
+        netbuf_data(inbuf, (void **)&buf, &buflen);
+
+        /* Route the request based on the first line */
+        if (strncmp(buf, "GET / ",        6) == 0) {
+          serve_html_page(newconn);
+        }
+        else if (strncmp(buf, "GET /api/status", 15) == 0) {
+          serve_json_status(newconn);
+        }
+        else if (strncmp(buf, "POST /api/command", 17) == 0) {
+          handle_command(newconn, buf, buflen);
+        }
+
+        netbuf_delete(inbuf);
+      }
+
+      netconn_close(newconn);
+      netconn_delete(newconn);
+    }
+  }
+}
+\end{lstlisting}
+
+\begin{infobox}[How HTTP Works at a Low Level]
+When you type \texttt{192.168.1.50} in your browser, the browser sends a TCP connection request to port 80. Our server accepts it. The browser then sends a text string like \texttt{GET / HTTP/1.1\textbackslash r\textbackslash n...}. We read this string, check if it starts with \texttt{GET /} or \texttt{POST /api/command}, and send back the appropriate response (HTML page or JSON data) as a plain text string with HTTP headers. The browser interprets the response based on the \texttt{Content-Type} header.
+\end{infobox}
+
+\newpage
+
+\subsection{JSON Status Endpoint}
+
+\begin{lstlisting}
+static void serve_json_status(struct netconn *conn) {
+  char response[512];
+  float temp, press, hum, target;
+  uint8_t door, pir, armed, alarm;
+
+  /* Copy shared state under mutex (copy-and-release pattern) */
+  osMutexAcquire(dashDataMutexHandle, osWaitForever);
+  temp   = dash_temp;
+  press  = dash_press;
+  hum    = dash_hum;
+  door   = dash_door_open;
+  pir    = dash_pir_motion;
+  armed  = dash_armed;
+  alarm  = dash_alarm;
+  target = dash_target_temp;
+  osMutexRelease(dashDataMutexHandle);
+
+  /* Build JSON response */
+  int len = snprintf(response, sizeof(response),
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: application/json\r\n"
+    "Access-Control-Allow-Origin: *\r\n"
+    "\r\n"
+    "{\"temp\":%.1f,\"pressure\":%.1f,\"humidity\":%.1f,"
+    "\"door\":\"%s\",\"motion\":%s,\"armed\":%s,"
+    "\"alarm\":%s,\"target_temp\":%.1f}",
+    temp, press, hum,
+    door   ? "OPEN" : "CLOSED",
+    pir    ? "true" : "false",
+    armed  ? "true" : "false",
+    alarm  ? "true" : "false",
+    target);
+
+  netconn_write(conn, response, len, NETCONN_COPY);
+}
+\end{lstlisting}
+
+\begin{infobox}[What is JSON?]
+JSON (JavaScript Object Notation) is a lightweight text format for structured data: \texttt{\{``key'': value, ...\}}. Browsers can parse it natively with \texttt{JSON.parse()} or \texttt{fetch().then(r => r.json())}. We build the JSON string manually using \texttt{snprintf} because we cannot include a JSON library on a microcontroller --- it would waste Flash. The \texttt{snprintf} approach uses zero dynamic memory.
+\end{infobox}
+
+\subsection{POST Command Handler}
+
+\begin{lstlisting}
+static void handle_command(struct netconn *conn,
+                           char *buf, u16_t buflen) {
+  /* Find the POST body (after the blank line "\r\n\r\n") */
+  char *body = strstr(buf, "\r\n\r\n");
+  if (body) {
+    body += 4; /* skip past the blank line */
+
+    if (strstr(body, "action=arm")) {
+      send_arm_command(0x01);   /* CAN TX: 0x200, byte=0x01 */
+    }
+    else if (strstr(body, "action=disarm")) {
+      send_arm_command(0x02);   /* CAN TX: 0x200, byte=0x02 */
+    }
+    else if (strstr(body, "target_temp=")) {
+      char *val = strstr(body, "target_temp=") + 12;
+      float new_temp = strtof(val, NULL);
+      send_target_temp(new_temp); /* CAN TX: 0x201 */
+    }
+  }
+
+  /* Respond with success JSON */
+  const char *resp = "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: application/json\r\n\r\n"
+                     "{\"status\":\"ok\"}";
+  netconn_write(conn, resp, strlen(resp), NETCONN_COPY);
+}
+\end{lstlisting}
+
+\newpage
+
+% ======================================================================
+\section{Step 5: CAN Command Transmission}
+% ======================================================================
+
+These helper functions are called from the HTTP POST handler when the user clicks a button on the web page.
+
+\begin{lstlisting}
+extern CAN_HandleTypeDef hcan1;
+
+void send_arm_command(uint8_t cmd) {
+  CAN_TxHeaderTypeDef TxHeader;
+  uint8_t TxData[1];
+  uint32_t TxMailbox;
+
+  TxHeader.StdId = 0x200;
+  TxHeader.IDE   = CAN_ID_STD;
+  TxHeader.RTR   = CAN_RTR_DATA;
+  TxHeader.DLC   = 1;
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  TxData[0] = cmd;  /* 0x01 = ARM, 0x02 = DISARM */
+
+  if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+  }
+}
+
+void send_target_temp(float temp) {
+  CAN_TxHeaderTypeDef TxHeader;
+  uint8_t TxData[4];
+  uint32_t TxMailbox;
+
+  TxHeader.StdId = 0x201;
+  TxHeader.IDE   = CAN_ID_STD;
+  TxHeader.RTR   = CAN_RTR_DATA;
+  TxHeader.DLC   = 4;
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  memcpy(&TxData[0], &temp, 4);  /* float -> 4 raw bytes */
+
+  if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+  }
+}
+\end{lstlisting}
+
+\begin{infobox}[Data Flow: Browser Click to Buzzer]
+When the user clicks ``ARM'' on the web page:
+\begin{enumerate}
+  \item Browser sends \texttt{POST /api/command} with body \texttt{action=arm}
+  \item \texttt{httpServerTask} receives it via \texttt{netconn\_recv}
+  \item \texttt{handle\_command()} parses the body, calls \texttt{send\_arm\_command(0x01)}
+  \item \texttt{HAL\_CAN\_AddTxMessage} places CAN ID 0x200 with byte 0x01 into a TX mailbox
+  \item The CAN hardware transmits the frame onto the bus
+  \item The actuator's \texttt{canRxTask} reads it from its FIFO, sets \texttt{system\_armed = 1}
+  \item The actuator's \texttt{alarmTask} detects armed + door open $\rightarrow$ \texttt{Buzzer\_On()}
+  \item The actuator sends 0x105 feedback confirming the new state
+  \item The dashboard's \texttt{canRxTask} picks up 0x105, updates \texttt{dash\_armed = 1}
+  \item Next browser \texttt{fetch('/api/status')} returns \texttt{``armed'': true} $\rightarrow$ UI updates
+\end{enumerate}
+\end{infobox}
+
+\newpage
+
+% ======================================================================
+\section{Step 6: Embedded HTML/CSS/JS Dashboard}
+% ======================================================================
+
+The web page is stored as a \texttt{const char[]} in Flash memory (no filesystem, no SD card). The JavaScript uses the \texttt{fetch()} API to poll \texttt{/api/status} every 2 seconds and update the page without a full reload.
+
+\begin{lstlisting}[language=HTML,
+  morekeywords={html,head,meta,title,style,body,div,h1,h2,span,button,input,label,script,
+                function,async,await,fetch,document,getElementById,setInterval,
+                const,let,true,false,JSON,parseInt,parseFloat}]
+const char html_page[] =
+"HTTP/1.1 200 OK\r\n"
+"Content-Type: text/html\r\n\r\n"
+"<!DOCTYPE html><html><head>"
+"<meta charset='UTF-8'>"
+"<title>Environmental Monitor Dashboard</title>"
+"<style>"
+"  body { font-family: Arial; background: #1a1a2e; color: #eee;"
+"         max-width: 800px; margin: auto; padding: 20px; }"
+"  h1 { color: #0f3460; text-align: center; }"
+"  .card { background: #16213e; border-radius: 10px;"
+"          padding: 15px; margin: 10px 0; }"
+"  .value { font-size: 2em; font-weight: bold; color: #e94560; }"
+"  .grid { display: grid; grid-template-columns: 1fr 1fr;"
+"          gap: 10px; }"
+"  button { background: #e94560; color: #fff; border: none;"
+"           padding: 12px 24px; border-radius: 6px;"
+"           font-size: 1em; cursor: pointer; margin: 5px; }"
+"  button:hover { background: #c73e54; }"
+"  input[type=number] { padding: 8px; font-size: 1em;"
+"                        width: 80px; border-radius: 4px; }"
+"</style></head><body>"
+"<h1>Environmental Monitor</h1>"
+"<div class='grid'>"
+"  <div class='card'><h2>Temperature</h2>"
+"    <span class='value' id='temp'>--</span> C</div>"
+"  <div class='card'><h2>Humidity</h2>"
+"    <span class='value' id='hum'>--</span> %</div>"
+"  <div class='card'><h2>Pressure</h2>"
+"    <span class='value' id='press'>--</span> hPa</div>"
+"  <div class='card'><h2>Door</h2>"
+"    <span class='value' id='door'>--</span></div>"
+"  <div class='card'><h2>Motion</h2>"
+"    <span class='value' id='motion'>--</span></div>"
+"  <div class='card'><h2>Alarm</h2>"
+"    <span class='value' id='alarm'>--</span></div>"
+"</div>"
+"<div class='card' style='text-align:center'>"
+"  <h2>Security: <span id='armed'>--</span></h2>"
+"  <button onclick='sendCmd(\"action=arm\")'>ARM</button>"
+"  <button onclick='sendCmd(\"action=disarm\")'>DISARM</button>"
+"</div>"
+"<div class='card' style='text-align:center'>"
+"  <h2>Target Temp: <span id='target'>--</span> C</h2>"
+"  <label>Set: </label>"
+"  <input type='number' id='tempIn' value='22' step='0.5'>"
+"  <button onclick='setTemp()'>Apply</button>"
+"</div>"
+"<script>"
+"async function update(){"
+"  let r=await fetch('/api/status');"
+"  let d=await r.json();"
+"  document.getElementById('temp').innerText=d.temp.toFixed(1);"
+"  document.getElementById('hum').innerText=d.humidity.toFixed(1);"
+"  document.getElementById('press').innerText=d.pressure.toFixed(1);"
+"  document.getElementById('door').innerText=d.door;"
+"  document.getElementById('motion').innerText=d.motion?'ACTIVE':'IDLE';"
+"  document.getElementById('armed').innerText=d.armed?'ARMED':'DISARMED';"
+"  document.getElementById('alarm').innerText=d.alarm?'SOUNDING':'Silent';"
+"  document.getElementById('target').innerText=d.target_temp.toFixed(1);"
+"}"
+"async function sendCmd(b){"
+"  await fetch('/api/command',{method:'POST',"
+"    headers:{'Content-Type':'application/x-www-form-urlencoded'},"
+"    body:b}); update();}"
+"function setTemp(){"
+"  let v=document.getElementById('tempIn').value;"
+"  sendCmd('target_temp='+v);}"
+"setInterval(update,2000); update();"
+"</script></body></html>";
+\end{lstlisting}
+
+\begin{infobox}[Why Embed HTML in C?]
+Microcontrollers don't have a filesystem. There is no ``www'' folder to place HTML files in. Instead, the entire HTML page is compiled as a constant string literal into the firmware's Flash memory. When a browser requests \texttt{GET /}, the server sends this string verbatim. The advantage: zero runtime overhead, no SD card, no file parsing. The disadvantage: changing the web page requires reflashing the firmware.
+\end{infobox}
+
+\newpage
+
+% ======================================================================
+\section{Step 7: Actuator Node Modifications}
+% ======================================================================
+
+These changes go into the \emph{existing} actuator node code.
+
+\subsection{7a. Make Target Temperature a Runtime Variable}
+
+In \texttt{actuator\_node/Core/Src/freertos.c}, replace the compile-time constant with a mutable variable:
+
+\begin{lstlisting}
+/* BEFORE (compile-time constant -- cannot be changed at runtime) */
+#define PREFERRED_TEMP_C  22.0f
+
+/* AFTER (runtime variable -- can be updated via CAN command) */
+volatile float target_temp = 22.0f;
+\end{lstlisting}
+
+Update \texttt{climateTask} to read \texttt{target\_temp} under the mutex instead of the old \texttt{PREFERRED\_TEMP\_C} define.
+
+\subsection{7b. Handle New CAN Message IDs in canRxTask}
+
+Add two new \texttt{else if} branches inside the existing CAN receive loop:
+
+\begin{lstlisting}
+else if (RxHeader.StdId == 0x200) {
+  /* Remote arm/disarm command from the web dashboard */
+  if (RxData[0] == 0x01) {
+    system_armed = 1;
+    HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_SET);
+  } else if (RxData[0] == 0x02) {
+    system_armed = 0;
+    HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_RESET);
+    Buzzer_Off();
+  }
+}
+else if (RxHeader.StdId == 0x201) {
+  /* Remote target temperature setpoint from the web dashboard */
+  osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+  memcpy((void *)&target_temp, &RxData[0], 4);
+  osMutexRelease(sensorDataMutexHandle);
+}
+\end{lstlisting}
+
+\subsection{7c. Add Periodic Status Transmission (New Task)}
+
+Create a \texttt{statusTxTask} that broadcasts the actuator's state every 1 second on CAN ID 0x105:
+
+\begin{lstlisting}
+void StartStatusTxTask(void *argument) {
+  CAN_TxHeaderTypeDef TxHeader;
+  uint8_t TxData[6];
+  uint32_t TxMailbox;
+
+  TxHeader.StdId = 0x105;
+  TxHeader.IDE   = CAN_ID_STD;
+  TxHeader.RTR   = CAN_RTR_DATA;
+  TxHeader.DLC   = 6;
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  for (;;) {
+    TxData[0] = system_armed;
+    TxData[1] = (system_armed &&
+                (remote_door_open || remote_pir_motion)) ? 1 : 0;
+
+    osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+    memcpy(&TxData[2], (void *)&target_temp, 4);
+    osMutexRelease(sensorDataMutexHandle);
+
+    if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0) {
+      HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+    }
+
+    osDelay(1000); /* Send status every 1 second */
+  }
+}
+\end{lstlisting}
+
+\begin{infobox}[Why a Separate Status TX Task?]
+The actuator cannot respond ``on demand'' to dashboard queries --- CAN is not a request/response protocol like HTTP. Instead, the actuator periodically \emph{broadcasts} its state. Any node on the bus (including future nodes) can listen. This is the standard CAN approach: producers broadcast, consumers filter. The 1-second interval balances bus load against dashboard responsiveness.
+\end{infobox}
+
+\newpage
+
+% ======================================================================
+\section{Step 8: Hardware Wiring}
+% ======================================================================
+
+\subsection{CAN Bus (3 Nodes)}
+
+\begin{verbatim}
+  Sender (F303)         Actuator (F303)        Dashboard (F767ZI)
+    PA12 (CAN_TX)         PA12 (CAN_TX)          PD1 (CAN1_TX)
+    PA11 (CAN_RX)         PA11 (CAN_RX)          PD0 (CAN1_RX)
+    GND                   GND                    GND
+
+    [120 Ohm]                                    [120 Ohm]
+    CAN_H ================CAN_H=================CAN_H
+    CAN_L ================CAN_L=================CAN_L
+\end{verbatim}
+
+\begin{warnbox}[Termination Resistors]
+Place a 120$\Omega$ resistor between CAN\_H and CAN\_L at each \emph{physical end} of the bus. With three nodes in a line, the sender and dashboard are at the ends; the actuator is in the middle and does \textbf{not} get a termination resistor. If you are using short jumper wires on a bench (under 30\,cm total), a single 120$\Omega$ on one end may work, but two is correct practice.
+\end{warnbox}
+
+\begin{infobox}[CAN Transceiver Reminder]
+Each STM32 board's CAN TX/RX pins output 3.3V digital logic. They do \textbf{not} directly connect to the CAN bus wires. You need a CAN transceiver chip (e.g., MCP2551, SN65HVD230, or TJA1050) on each node to convert between 3.3V logic and the differential CAN\_H/CAN\_L voltage levels. The transceiver is what physically drives the bus.
+\end{infobox}
+
+\subsection{Ethernet}
+\begin{itemize}[leftmargin=2em]
+  \item Plug a standard Ethernet cable (Cat5e or better) from the NUCLEO-F767ZI's RJ45 jack into your router or network switch
+  \item If using DHCP: check your router admin page (usually 192.168.1.1) to find the assigned IP
+  \item If using static IP (192.168.1.50): type \texttt{http://192.168.1.50} directly into your browser
+  \item The browser and the board must be on the same local network (same subnet)
+\end{itemize}
+
+\newpage
+
+% ======================================================================
+\section{Step 9: Testing Sequence}
+% ======================================================================
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Flash the actuator node first} with the updated code (new CAN IDs + status TX task)
+  \item \textbf{Flash the dashboard node} with the full web server firmware
+  \item \textbf{Power on all three boards} and connect the CAN bus wires (CAN\_H, CAN\_L, GND between all nodes via transceivers)
+  \item \textbf{Plug Ethernet cable} into the F767ZI and your router
+  \item \textbf{Find the IP address:}
+  \begin{itemize}
+    \item Static IP: you already know it (e.g., 192.168.1.50)
+    \item DHCP: check router admin page, or use a network scanner app
+  \end{itemize}
+  \item \textbf{Open a browser} and navigate to \texttt{http://<IP\_ADDRESS>}
+  \item \textbf{Verify sensor reads:} Temperature, pressure, humidity should appear and update every 2 seconds
+  \item \textbf{Verify arm/disarm:} Click ARM on the web page $\rightarrow$ actuator's ARM LED should light up. Click DISARM $\rightarrow$ LED off.
+  \item \textbf{Verify temperature setpoint:} Set 30$^\circ$C on the web page $\rightarrow$ actuator should blink the green (fan) LED. Set 15$^\circ$C $\rightarrow$ blue (heater) LED.
+  \item \textbf{Verify alarm:} ARM the system via web, then open the door sensor $\rightarrow$ buzzer sounds. DISARM via web $\rightarrow$ buzzer stops.
+  \item \textbf{Verify status feedback:} The web page should show ``ARMED'' / ``DISARMED'' matching the actuator's actual state (confirmed via 0x105, not assumed).
+\end{enumerate}
+
+\newpage
+
+% ======================================================================
+\section{Key Pitfalls to Watch For}
+% ======================================================================
+
+\begin{warnbox}[MPU / D-Cache (F7-Specific)]
+If Ethernet ``partially works'' (ping succeeds but TCP/HTTP fails or is unreliable), the MPU region for Ethernet DMA buffers is likely misconfigured. The DMA descriptor memory \textbf{must} be marked as non-cacheable. This is the \#1 reason LwIP fails on STM32F7.
+\end{warnbox}
+
+\begin{warnbox}[Heap Exhaustion]
+If \texttt{osThreadNew}, \texttt{osMutexNew}, or \texttt{netconn\_new} returns NULL, you have run out of FreeRTOS heap. Increase \texttt{configTOTAL\_HEAP\_SIZE} in \texttt{FreeRTOSConfig.h}. Monitor free heap at runtime with \texttt{xPortGetFreeHeapSize()}.
+\end{warnbox}
+
+\begin{warnbox}[CAN Baud Rate Mismatch]
+If CAN communication fails between the F767ZI and the F303 boards, the most likely cause is a baud rate mismatch. Double-check the prescaler/BS1/BS2 calculation for the F767ZI's APB1 clock. Use an oscilloscope or logic analyzer on CAN\_TX to verify the actual bit rate.
+\end{warnbox}
+
+\begin{warnbox}[LwIP Thread Safety]
+LwIP Netconn functions are thread-safe \emph{only} when called from a FreeRTOS task (not from ISR context). Never call \texttt{netconn\_write} from a CAN interrupt or timer callback. Always do network operations from the \texttt{httpServerTask}.
+\end{warnbox}
+
+\begin{warnbox}[Ethernet PHY Reset Timing]
+The LAN8742A PHY on the Nucleo board may need a brief delay (50--100\,ms) after power-on before it can be initialized. If Ethernet fails to establish a link on the first boot but works after a reset, add a \texttt{HAL\_Delay(100)} before the LwIP initialization in \texttt{main.c}.
+\end{warnbox}
+
+\begin{infobox}[Debugging Tips]
+\begin{itemize}
+  \item \textbf{Heartbeat LED:} The \texttt{statusLedTask} blinks LD1 every 500\,ms. If the LED stops blinking, the RTOS has crashed (probably a stack overflow or hard fault).
+  \item \textbf{Ping test:} Before testing the web server, try \texttt{ping 192.168.1.50} from your PC. If ping fails, the problem is at the Ethernet/LwIP level, not the HTTP server.
+  \item \textbf{CAN traffic LED:} Toggle a GPIO in \texttt{canRxTask} on each received message (same as your actuator's PA5 traffic LED). If it never toggles, the CAN filter or wiring is wrong.
+  \item \textbf{Stack high-water mark:} Call \texttt{uxTaskGetStackHighWaterMark(httpServerTaskHandle)} periodically and check that it never drops below $\sim$50 words. If it does, increase the stack.
+\end{itemize}
+\end{infobox}
+
+\vfill
+\begin{center}
+\rule{0.6\textwidth}{0.4pt}\\[0.5em]
+{\small End of Dashboard Node Implementation Plan --- 13 Pages}
+\end{center}
+
+\end{document}

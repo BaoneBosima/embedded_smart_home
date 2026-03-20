@@ -137,7 +137,7 @@ int main(void)
     HAL_CAN_Start(&hcan);
 
     // --- 3. SETUP HEADER ---
-    TxHeader.DLC = 5; // Length = 1 byte
+    TxHeader.DLC = 5;
     TxHeader.IDE = CAN_ID_STD;
     TxHeader.RTR = CAN_RTR_DATA;
     TxHeader.StdId = 0x103; // ID = 0x103
@@ -153,8 +153,8 @@ int main(void)
 
         // Send data every 500ms (prevent flooding the bus)
         if (HAL_GetTick() - last_tx_time > 500)
-        	last_tx_time = HAL_GetTick();
         {
+        	last_tx_time = HAL_GetTick();
             // --- MESSAGE 1: ID 0x103 (Door + PIR + Temperature) ---
             TxHeader.StdId = 0x103;
             TxHeader.DLC = 6; // 1 byte Door + 1 byte PIR + 4 bytes Temp
@@ -199,7 +199,8 @@ int main(void)
             // Only add the message if we actually broke out because a mailbox opened
             if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0) {
                 HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
-            }}
+            }
+        }
     }
     /* USER CODE END WHILE */
     /* USER CODE BEGIN 3 */

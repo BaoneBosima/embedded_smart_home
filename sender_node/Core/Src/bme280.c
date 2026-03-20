@@ -46,11 +46,12 @@ static struct {
 // --- Private Helper Functions (Compensation Math) ---
 
 static void BME280_ReadCalibration(void) {
-	uint8_t calib[26];
-	uint8_t hum_calib[7];
+	uint8_t calib[24];
 
-	// Read Temp/Pressure calibration
-	HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0x88, 1, calib, 24, HAL_MAX_DELAY);
+	// Read Temp/Pressure calibration (BMP280: no humidity registers)
+	if (HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0x88, 1, calib, 24, 100) != HAL_OK) {
+		return;
+	}
 	calib_data.dig_T1 = (calib[1] << 8) | calib[0];
 	calib_data.dig_T2 = (calib[3] << 8) | calib[2];
 	calib_data.dig_T3 = (calib[5] << 8) | calib[4];
@@ -63,15 +64,6 @@ static void BME280_ReadCalibration(void) {
 	calib_data.dig_P7 = (calib[19] << 8) | calib[18];
 	calib_data.dig_P8 = (calib[21] << 8) | calib[20];
 	calib_data.dig_P9 = (calib[23] << 8) | calib[22];
-
-	// Read Humidity calibration
-	HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0xA1, 1, &calib_data.dig_H1, 1, HAL_MAX_DELAY);
-	HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0xE1, 1, hum_calib, 7, HAL_MAX_DELAY);
-	calib_data.dig_H2 = (hum_calib[1] << 8) | hum_calib[0];
-	calib_data.dig_H3 = hum_calib[2];
-	calib_data.dig_H4 = (hum_calib[3] << 4) | (hum_calib[4] & 0x0F);
-	calib_data.dig_H5 = (hum_calib[5] << 4) | (hum_calib[4] >> 4);
-	calib_data.dig_H6 = hum_calib[6];
 }
 
 static float BME280_Compensate_T(int32_t adc_T) {
@@ -112,52 +104,49 @@ static uint32_t BME280_Compensate_H(int32_t adc_H) {
 // --- Public Functions ---
 
 void BME280_Init(I2C_HandleTypeDef *hi2c) {
-	hi2c_bme = hi2c; // Assign the I2C handle
+	hi2c_bme = hi2c;
 
 	// 1. Read Calibration
 	BME280_ReadCalibration();
 
-	// 2. Configure Humidity (ctrl_hum 0xF2)
-	uint8_t hum_conf = 0x01; // Oversampling x1
-	HAL_I2C_Mem_Write(hi2c_bme, BME280_ADDR, 0xF2, 1, &hum_conf, 1, HAL_MAX_DELAY);
+	// 2. Configure Config (config 0xF5) -> Standby 1000ms
+	// Must be written before entering Normal mode (config is only writable in sleep mode)
+	uint8_t config_conf = 0xA0;
+	HAL_I2C_Mem_Write(hi2c_bme, BME280_ADDR, 0xF5, 1, &config_conf, 1, 100);
 
 	// 3. Configure Measurement (ctrl_meas 0xF4) -> Normal Mode
 	uint8_t meas_conf = 0x27;
-	HAL_I2C_Mem_Write(hi2c_bme, BME280_ADDR, 0xF4, 1, &meas_conf, 1, HAL_MAX_DELAY);
-
-	// 4. Configure Config (config 0xF5) -> Standby 1000ms
-	uint8_t config_conf = 0xA0;
-	HAL_I2C_Mem_Write(hi2c_bme, BME280_ADDR, 0xF5, 1, &config_conf, 1, HAL_MAX_DELAY);
+	HAL_I2C_Mem_Write(hi2c_bme, BME280_ADDR, 0xF4, 1, &meas_conf, 1, 100);
 }
 
 void BME280_ReadSensor(BME280_Data *data) {
-	uint8_t raw_data[8];
-	int32_t raw_temp, raw_press, raw_hum;
+	uint8_t raw_data[6];
+	int32_t raw_temp, raw_press;
 
-	// Burst Read 0xF7 to 0xFE
-	HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0xF7, 1, raw_data, 8, HAL_MAX_DELAY);
+	// Burst Read 0xF7 to 0xFC (BMP280: 6 bytes for pressure + temperature)
+	if (HAL_I2C_Mem_Read(hi2c_bme, BME280_ADDR, 0xF7, 1, raw_data, 6, 100) != HAL_OK) {
+		data->temperature_C = 0.0f;
+		data->pressure_hPa = 0.0f;
+		data->humidity_pct = 0.0f;
+		return;
+	}
 
-	// Copy to debug array for live expressions
-	for (int i = 0; i < 8; i++) {
+	for (int i = 0; i < 6; i++) {
 		bme280_debug_raw_data[i] = raw_data[i];
 	}
 
 	raw_press = (raw_data[0] << 12) | (raw_data[1] << 4) | (raw_data[2] >> 4);
 	raw_temp  = (raw_data[3] << 12) | (raw_data[4] << 4) | (raw_data[5] >> 4);
-	raw_hum   = (raw_data[6] << 8) | raw_data[7];
 
-	// Update debug variables
 	bme280_debug_raw_press = raw_press;
 	bme280_debug_raw_temp  = raw_temp;
-	bme280_debug_raw_hum   = raw_hum;
+	bme280_debug_raw_hum   = 0;
 
-	// Convert and store in the struct
 	data->temperature_C = BME280_Compensate_T(raw_temp) / 100.0f;
-	data->pressure_hPa = BME280_Compensate_P(raw_press) / 256.0f;
-	data->humidity_pct = BME280_Compensate_H(raw_hum) / 1024.0f;
+	data->pressure_hPa = BME280_Compensate_P(raw_press) / 25600.0f;
+	data->humidity_pct = 0.0f;
 
-	// Update debug compensated values
-	bme280_debug_temp_C   = data->temperature_C;
+	bme280_debug_temp_C    = data->temperature_C;
 	bme280_debug_press_hPa = data->pressure_hPa;
-	bme280_debug_hum_pct  = data->humidity_pct;
+	bme280_debug_hum_pct   = 0.0f;
 }
