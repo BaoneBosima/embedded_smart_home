@@ -131,34 +131,31 @@ int main(void)
 
   HAL_CAN_ConfigFilter(&hcan, &canfilterconfig);
 
-  /* Start the CAN peripheral — transitions from Initialization to Normal mode.
+  /* Start the CAN peripheral — transitions from Initialization to Normal mode. */
   HAL_CAN_Start(&hcan);
 
   /* Force the buzzer/alarm GPIO low so we start in a known silent state */
   Buzzer_Off();
   /* USER CODE END 2 */
 
-  /*
-   * --- FreeRTOS STARTUP SEQUENCE ---
-   * 1. osKernelInitialize() — sets up the RTOS internal data structures
-   * 2. MX_FREERTOS_Init()   — creates all tasks, mutexes, and semaphores
-   * 3. osKernelStart()      — hands control to the scheduler (never returns)
-   *
-   * Once osKernelStart() is called, the while(1) below is unreachable.
-   * The CPU is now managed by the FreeRTOS scheduler, which context-switches
-   * between the tasks we created in MX_FREERTOS_Init().
-   */
+  /* Init scheduler */
   osKernelInitialize();
+
+  /* Call init function for freertos objects (in cmsis_os2.c) */
   MX_FREERTOS_Init();
+
+  /* Start scheduler */
   osKernelStart();
 
+  /* We should never get here as control is now taken by the scheduler */
 
+  /* Infinite loop */
   /* USER CODE BEGIN WHILE */
     while (1)
     {
     }
     /* USER CODE END WHILE */
-    /* Unreachable — the scheduler now owns the CPU */
+
     /* USER CODE BEGIN 3 */
 
   /* USER CODE END 3 */
@@ -220,16 +217,17 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         uint32_t current_time = HAL_GetTick();
 
         /*
-         * Software debounce: mechanical buttons bounce for 5-20ms after
-         * a press, generating multiple spurious interrupts. By requiring
-         * 200ms between accepted presses, we filter out all bounce noise
-         * without blocking the CPU (no HAL_Delay inside an ISR!).
+         * Software debounce: ignore repeats within 200 ms of the last *accepted* press.
+         * Do not compare against last_button_press == 0: (now - 0) > 200 would reject
+         * every press until system time exceeds 200 ms, which feels like a dead button.
          */
-        if ((current_time - last_button_press) > 200)
+        if (last_button_press != 0U && (current_time - last_button_press) <= 200U)
         {
-            osSemaphoreRelease(armButtonSemHandle);
-            last_button_press = current_time;
+            return;
         }
+
+        (void)osSemaphoreRelease(armButtonSemHandle);
+        last_button_press = current_time;
     }
 }
 /* USER CODE END 4 */
@@ -242,14 +240,6 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   * @param  htim : TIM handle
   * @retval None
   */
-/*
- * HAL_TIM_PeriodElapsedCallback — TIM6 overflow interrupt (fires every 1ms).
- *
- * Because FreeRTOS owns SysTick, the HAL's own millisecond counter
- * (used by HAL_Delay, HAL_GetTick) was moved to TIM6. This callback
- * increments the HAL tick counter so HAL_GetTick() keeps working
- * alongside FreeRTOS.
- */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   /* USER CODE BEGIN Callback 0 */
@@ -281,7 +271,7 @@ void Error_Handler(void)
 #ifdef  USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
-  * where the assert_param error has occurred.
+  *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
   * @param  line: assert_param error line source number
   * @retval None

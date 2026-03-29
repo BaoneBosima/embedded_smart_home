@@ -40,7 +40,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define PREFERRED_TEMP_C        22.0f   /* Target room temperature in Celsius for climate control */
+//#define PREFERRED_TEMP_C        22.0f   /* Target room temperature in Celsius for climate control */
 #define NO_MOTION_TIMEOUT_MS    30000U  /* 30 seconds: if no PIR motion within this window, disable HVAC LEDs */
 #define ACTUATOR_BLINK_MS       500U    /* LED toggle period for heater/fan visual indicator */
 /* USER CODE END PD */
@@ -85,56 +85,50 @@ volatile uint32_t last_motion_tick  = 0;     /* HAL_GetTick() timestamp of last 
 /* Debug counters: track how many messages of each CAN ID have been received */
 volatile uint32_t rx_count_103 = 0;
 volatile uint32_t rx_count_104 = 0;
-/* USER CODE END Variables */
-/*
- * ============================================================================
- *  TASK DEFINITIONS
- * ============================================================================
- */
 
+volatile float target_temp = 22.0f;
+/* USER CODE END Variables */
+/* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-
+/* Definitions for canRxTask */
 osThreadId_t canRxTaskHandle;
 const osThreadAttr_t canRxTask_attributes = {
   .name = "canRxTask",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-
+/* Definitions for alarmTask */
 osThreadId_t alarmTaskHandle;
 const osThreadAttr_t alarmTask_attributes = {
   .name = "alarmTask",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-
+/* Definitions for climateTask */
 osThreadId_t climateTaskHandle;
 const osThreadAttr_t climateTask_attributes = {
   .name = "climateTask",
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityBelowNormal,
 };
-
-/*
- * sensorDataMutex: Protects the shared sensor variables (remote_temp, etc.)
- * from concurrent access. The canRxTask acquires this to write new data;
- * alarmTask and climateTask acquire it to read a consistent snapshot.
- */
+/* Definitions for statusTxTask */
+osThreadId_t statusTxTaskHandle;
+const osThreadAttr_t statusTxTask_attributes = {
+  .name = "statusTxTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for sensorDataMutex */
 osMutexId_t sensorDataMutexHandle;
 const osMutexAttr_t sensorDataMutex_attributes = {
   .name = "sensorDataMutex"
 };
-
-/*
- * armButtonSem: Binary semaphore (max_count=1) used for ISR-to-task signaling.
- * The EXTI callback in main.c releases it; defaultTask blocks on it.
- * Initial count = 0: task blocks until the first real button press.
- */
+/* Definitions for armButtonSem */
 osSemaphoreId_t armButtonSemHandle;
 const osSemaphoreAttr_t armButtonSem_attributes = {
   .name = "armButtonSem"
@@ -149,6 +143,7 @@ void StartDefaultTask(void *argument);
 void StartCanRxTask(void *argument);
 void StartAlarmTask(void *argument);
 void StartClimateTask(void *argument);
+void StartStatusTxTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -157,29 +152,19 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   * @param  None
   * @retval None
   */
-/*
- * MX_FREERTOS_Init — Called once from main() before osKernelStart().
- * Creates all RTOS objects in order: mutexes -> semaphores -> threads.
- * No task runs until osKernelStart() is called after this function returns.
- */
 void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
-
-  /* --- MUTEX CREATION --- */
+  /* Create the mutex(es) */
+  /* creation of sensorDataMutex */
   sensorDataMutexHandle = osMutexNew(&sensorDataMutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* USER CODE END RTOS_MUTEX */
 
-  /*
-   * --- SEMAPHORE CREATION ---
-   * osSemaphoreNew(max_count, initial_count, attr)
-   *   max_count = 1     -> binary semaphore (can only hold 0 or 1)
-   *   initial_count = 0 -> starts "taken", so defaultTask will block
-   *                        until the ISR releases it on the first button press
-   */
+  /* Create the semaphores(s) */
+  /* creation of armButtonSem — initial count 0: wait for button ISR, not a spurious wake at boot */
   armButtonSemHandle = osSemaphoreNew(1, 0, &armButtonSem_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
@@ -191,17 +176,21 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE BEGIN RTOS_QUEUES */
   /* USER CODE END RTOS_QUEUES */
 
-  /*
-   * --- THREAD (TASK) CREATION ---
-   * osThreadNew(function, argument, attributes)
-   *   function  — the C function that becomes the task's infinite loop
-   *   argument  — passed as void* to the function (NULL = unused here)
-   *   attributes — name, stack size, priority (defined above)
-   */
+  /* Create the thread(s) */
+  /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
-  canRxTaskHandle   = osThreadNew(StartCanRxTask,   NULL, &canRxTask_attributes);
-  alarmTaskHandle   = osThreadNew(StartAlarmTask,   NULL, &alarmTask_attributes);
+
+  /* creation of canRxTask */
+  canRxTaskHandle = osThreadNew(StartCanRxTask, NULL, &canRxTask_attributes);
+
+  /* creation of alarmTask */
+  alarmTaskHandle = osThreadNew(StartAlarmTask, NULL, &alarmTask_attributes);
+
+  /* creation of climateTask */
   climateTaskHandle = osThreadNew(StartClimateTask, NULL, &climateTask_attributes);
+
+  /* creation of statusTxTask */
+  statusTxTaskHandle = osThreadNew(StartStatusTxTask, NULL, &statusTxTask_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* USER CODE END RTOS_THREADS */
@@ -302,10 +291,24 @@ void StartCanRxTask(void *argument)
           memcpy((void *)&remote_press, &RxData[0], 4);
           memcpy((void *)&remote_hum,   &RxData[4], 4);
       }
+      else if (RxHeader.StdId == 0x200)
+      {
+          if (RxData[0] == 0x01) {
+              system_armed = 1;
+              HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_SET);
+          } else if (RxData[0] == 0x02) {
+              system_armed = 0;
+              HAL_GPIO_WritePin(ARM_LED_GPIO_Port, ARM_LED_Pin, GPIO_PIN_RESET);
+              Buzzer_Off();
+          }
+      }
+      else if (RxHeader.StdId == 0x201)
+      {
+          memcpy((void *)&target_temp, &RxData[0], 4);
+      }
 
       osMutexRelease(sensorDataMutexHandle);
     }
-
     /* Yield to lower-priority tasks; 10ms polling interval is fast enough
      * given the sender transmits every 500ms */
     osDelay(10);
@@ -348,7 +351,7 @@ void StartAlarmTask(void *argument)
 
     if (system_armed && (local_door_open || local_pir_motion)) {
         Buzzer_On();
-    } else if (system_armed) {
+    } else {
         Buzzer_Off();
     }
 
@@ -379,12 +382,14 @@ void StartClimateTask(void *argument)
   /* USER CODE BEGIN StartClimateTask */
   uint32_t last_heater_fan_blink = 0;
   float local_temp;
+  float local_target_temp;
   uint32_t local_motion_tick;
 
   for(;;)
   {
     osMutexAcquire(sensorDataMutexHandle, osWaitForever);
     local_temp        = remote_temp;
+    local_target_temp = target_temp;
     local_motion_tick = last_motion_tick;
     osMutexRelease(sensorDataMutexHandle);
 
@@ -401,14 +406,14 @@ void StartClimateTask(void *argument)
         HAL_GPIO_WritePin(blue_led_GPIO_Port,  blue_led_Pin,  GPIO_PIN_RESET);
         HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
     } else {
-        if (local_temp < PREFERRED_TEMP_C) {
+        if (local_temp < local_target_temp) {
             /* Too cold -> blink blue (heater indicator) */
             if (now - last_heater_fan_blink >= ACTUATOR_BLINK_MS) {
                 HAL_GPIO_TogglePin(blue_led_GPIO_Port, blue_led_Pin);
                 last_heater_fan_blink = now;
             }
             HAL_GPIO_WritePin(green_led_GPIO_Port, green_led_Pin, GPIO_PIN_RESET);
-        } else if (local_temp > PREFERRED_TEMP_C) {
+        } else if (local_temp > local_target_temp) {
             /* Too hot -> blink green (fan/AC indicator) */
             if (now - last_heater_fan_blink >= ACTUATOR_BLINK_MS) {
                 HAL_GPIO_TogglePin(green_led_GPIO_Port, green_led_Pin);
@@ -427,7 +432,51 @@ void StartClimateTask(void *argument)
   /* USER CODE END StartClimateTask */
 }
 
+/* USER CODE BEGIN Header_StartStatusTxTask */
+/**
+* @brief Function implementing the statusTxTask thread.
+*/
+/* USER CODE END Header_StartStatusTxTask */
+void StartStatusTxTask(void *argument)
+{
+  /* USER CODE BEGIN StartStatusTxTask */
+  CAN_TxHeaderTypeDef TxHeader;
+  uint8_t TxData[6];
+  uint32_t TxMailbox;
+
+  TxHeader.StdId = 0x105;
+  TxHeader.IDE = CAN_ID_STD;
+  TxHeader.RTR = CAN_RTR_DATA;
+  TxHeader.DLC = 6;
+  TxHeader.TransmitGlobalTime = DISABLE;
+
+  for(;;)
+  {
+      // Byte 0: Armed Status
+      TxData[0] = system_armed;
+
+      // Byte 1: Alarm Status (Sounding or not)
+      TxData[1] = (system_armed && (remote_door_open || remote_pir_motion)) ? 1 : 0;
+
+      // Bytes 2-5: Current Target Temperature
+      osMutexAcquire(sensorDataMutexHandle, osWaitForever);
+      memcpy(&TxData[2], (void *)&target_temp, 4);
+      osMutexRelease(sensorDataMutexHandle);
+
+      // Transmit the message
+      if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan) > 0) {
+          HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox);
+      }
+
+      // Wait 1 second before broadcasting again
+      osDelay(1000);
+  }
+  /* USER CODE END StartStatusTxTask */
+}
+
+
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
+

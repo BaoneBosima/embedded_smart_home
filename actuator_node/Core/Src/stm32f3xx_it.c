@@ -55,8 +55,8 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
-extern CAN_HandleTypeDef hcan;   /* Defined in can.c — needed by USB_LP_CAN_RX0 IRQ handler */
-extern TIM_HandleTypeDef htim6;  /* Defined in stm32f3xx_hal_timebase_tim.c — HAL tick source */
+extern CAN_HandleTypeDef hcan;
+extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
 
@@ -155,17 +155,13 @@ void DebugMon_Handler(void)
 
 /******************************************************************************/
 /* STM32F3xx Peripheral Interrupt Handlers                                    */
-/*                                                                            */
-/* NOTE: SVC_Handler, PendSV_Handler, and SysTick_Handler are NOT defined     */
-/* here because FreeRTOSConfig.h maps the FreeRTOS port handlers directly     */
-/* to those CMSIS names via #define. Defining them here would cause a          */
-/* "multiple definition" linker error.                                        */
+/* Add here the Interrupt Handlers for the used peripherals.                  */
+/* For the available peripheral interrupt handler names,                      */
+/* please refer to the startup file (startup_stm32f3xx.s).                    */
 /******************************************************************************/
 
 /**
-  * @brief EXTI1 — Push button interrupt (PA1 falling edge).
-  *        Clears the EXTI pending flag and calls HAL_GPIO_EXTI_Callback()
-  *        in main.c, which debounces and releases the armButtonSem semaphore.
+  * @brief This function handles EXTI line1 interrupt.
   */
 void EXTI1_IRQHandler(void)
 {
@@ -179,11 +175,7 @@ void EXTI1_IRQHandler(void)
 }
 
 /**
-  * @brief CAN RX FIFO0 interrupt.
-  *        On STM32F303, CAN_RX0 shares its IRQ line with USB_LP.
-  *        The HAL handler manages CAN error/status flags internally.
-  *        We use polling in canRxTask to actually read messages, so
-  *        this handler only maintains internal HAL CAN state.
+  * @brief This function handles USB low priority or CAN_RX0 interrupts.
   */
 void USB_LP_CAN_RX0_IRQHandler(void)
 {
@@ -197,10 +189,7 @@ void USB_LP_CAN_RX0_IRQHandler(void)
 }
 
 /**
-  * @brief TIM6 overflow interrupt — fires every 1ms.
-  *        Calls HAL_TIM_IRQHandler which in turn calls
-  *        HAL_TIM_PeriodElapsedCallback (in main.c) -> HAL_IncTick().
-  *        This is the HAL timebase since SysTick belongs to FreeRTOS.
+  * @brief This function handles TIM6 global interrupt and DAC1 underrun interrupt.
   */
 void TIM6_DAC_IRQHandler(void)
 {
